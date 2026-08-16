@@ -1,0 +1,805 @@
+import AppKit
+import AVFoundation
+import Foundation
+import ImageIO
+import Speech
+
+struct EnhanceStatus: Equatable {
+    let isError: Bool
+    let message: String
+}
+
+enum EnhancePhase: Equatable {
+    case idle
+    case enhancing(Int)
+    case listening(String)
+    case success(String)
+    case error(String)
+}
+
+@MainActor
+final class AppState: ObservableObject {
+
+    static let shared = AppState()
+
+    @Published var isAccessibilityTrusted = AXService.isTrusted
+    @Published var screenRecordingGranted = ScreenCapture.isAuthorized
+    @Published var microphoneGranted = false
+    @Published var speechGranted = false
+    @Published var launchAtLogin = LaunchAgentManager.isInstalled
+
+    @Published var provider: LLMProvider = .anthropic
+    @Published var model: String = LLMProvider.anthropic.defaultModel
+    @Published var baseURL: String = LLMProvider.anthropic.defaultBaseURL
+    @Published var apiKey: String = ""
+    @Published var systemPrompt: String = LLMClient.defaultSystemPrompt
+    /// The setup form stays collapsed once an API key is saved; clicking the
+    /// status indicator expands it again to change the key/provider.
+    @Published var llmSetupExpanded = false
+
+    @Published var isEnhancing = false
+    @Published var enhancePhase: EnhancePhase = .idle
+    @Published var testStatus: EnhanceStatus?
+
+    /// Push-to-talk dictation: hold Option to speak, release to insert.
+    @Published var isListening = false
+    private let transcriber = SpeechTranscriber()
+    private var dictationFinished = false
+    private var dictationSession = 0
+
+    /// The last successful enhancement, so Cmd+Z / Ctrl+Z can restore the
+    /// original text (AX/paste write-backs are not undoable by the target app).
+    private struct UndoRecord {
+        let element: AXUIElement
+        let appElement: AXUIElement?
+        let appPID: pid_t
+        let isTerminal: Bool
+        let originalText: String
+        let date: Date
+    }
+    private var lastUndo: UndoRecord?
+
+    /// Visual capture: triple-tap ⌥ → draw on a canvas (pen/shapes/laser) →
+    /// speak (live transcript) → Enter → a perfect prompt is generated from
+    /// the annotated screenshot + voice, pasted, and saved to history.
+    @Published var visualCaptureEnabled: Bool
+    /// Recently generated visual prompts: copy or remove them from the popover.
+    @Published var capturedPrompts: [String] = []
+    private let canvas = CanvasController()
+    private var visualCaptureDone = false
+    private var visualCaptureFocus: AXService.FocusedInput?
+
+    private let defaults = UserDefaults.standard
+
+    /// The pre-rename default system prompt ("You are Treki…"): stored configs
+    /// that still hold it are migrated to the new default on launch.
+    static let legacyDefaultSystemPrompt = LLMClient.defaultSystemPrompt
+        .replacingOccurrences(of: "You are enprompt,", with: "You are Treki,")
+
+    init() {
+        // Must be assigned before any other self use.
+        visualCaptureEnabled = defaults.object(forKey: "visualCaptureEnabled") as? Bool ?? true
+        capturedPrompts = defaults.stringArray(forKey: "capturedPrompts") ?? []
+        if let raw = defaults.string(forKey: "provider"), let provider = LLMProvider(rawValue: raw) {
+            self.provider = provider
+        }
+        // Migrate setups that pointed OpenAI-compatible at OpenRouter's API
+        // to the dedicated OpenRouter provider so the UI stays truthful.
+        let storedBaseURL = defaults.string(forKey: "baseURL")
+        if self.provider == .openAI, storedBaseURL?.contains("openrouter.ai") == true {
+            self.provider = .openRouter
+        }
+        if let stored = defaults.string(forKey: "model") {
+            // Migrate the unreliable rotating free pool to a pinned model.
+            model = (stored == "openrouter/free" || stored == "openrouter/auto")
+                ? provider.defaultModel
+                : stored
+        } else {
+            model = provider.defaultModel
+        }
+        baseURL = defaults.string(forKey: "baseURL") ?? provider.defaultBaseURL
+        apiKey = KeychainStore.load() ?? ""
+        // First launch under the new bundle id: carry the API key over from the
+        // old com.treki.app keychain entry and drop the old entry.
+        if apiKey.isEmpty, let legacy = KeychainStore.loadLegacy() {
+            apiKey = legacy
+            KeychainStore.save(legacy)
+            KeychainStore.deleteLegacy()
+            DebugLogger.log("KEYCHAIN: migrated API key from legacy service")
+        }
+        if let prompt = defaults.string(forKey: "systemPrompt"), !prompt.isEmpty {
+            systemPrompt = prompt
+        }
+        // Renamed the assistant: swap the old default system prompt for the new.
+        if systemPrompt == Self.legacyDefaultSystemPrompt {
+            systemPrompt = LLMClient.defaultSystemPrompt
+        }
+    }
+
+    var config: LLMConfig {
+        LLMConfig(provider: provider, model: model, apiKey: apiKey, baseURL: baseURL)
+    }
+
+    /// The provider inferred from the key currently in the field. nil when the
+    /// key matches no known provider.
+    var detectedProvider: LLMProvider? {
+        LLMProvider.providerForAPIKey(apiKey)
+    }
+
+    // MARK: - Persistence
+
+    func persistConfig() {
+        defaults.set(provider.rawValue, forKey: "provider")
+        defaults.set(model, forKey: "model")
+        defaults.set(baseURL, forKey: "baseURL")
+        defaults.set(systemPrompt, forKey: "systemPrompt")
+        if !apiKey.isEmpty {
+            KeychainStore.save(apiKey)
+        }
+    }
+
+    func applyProviderDefaults() {
+        model = provider.defaultModel
+        baseURL = provider.defaultBaseURL
+        persistConfig()
+    }
+
+    // MARK: - Captures
+
+    func refreshTrust() {
+        refreshPermissions()
+    }
+
+    /// Polled every second: keeps every permission status up to date and
+    /// relaunches the app the moment Screen Recording is granted (macOS only
+    /// honors that grant after a process restart).
+    func refreshPermissions() {
+        let trusted = AXService.isTrusted
+        if trusted != isAccessibilityTrusted {
+            isAccessibilityTrusted = trusted
+        }
+        let screenRecording = ScreenCapture.isAuthorized
+        if screenRecording != screenRecordingGranted {
+            screenRecordingGranted = screenRecording
+            if screenRecording {
+                relaunchAfterPermissionGrant()
+            }
+        }
+        microphoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        speechGranted = SFSpeechRecognizer.authorizationStatus() == .authorized
+    }
+
+    /// Asks for mic + speech up-front at launch so dictation and the canvas
+    /// never have to prompt in the middle of a flow.
+    func requestPrivacyPermissions() {
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { _ in }
+        }
+        if SFSpeechRecognizer.authorizationStatus() == .notDetermined {
+            SFSpeechRecognizer.requestAuthorization { _ in }
+        }
+    }
+
+    /// Screen Recording only takes effect after a restart, so relaunch
+    /// automatically: through launchd when the launch agent is installed,
+    /// otherwise via `open`. Also usable as a manual "Restart enprompt now".
+    func relaunchAfterPermissionGrant() {
+        DebugLogger.log("SCREEN RECORDING GRANTED — relaunching automatically")
+        let script: String
+        if LaunchAgentManager.isInstalled {
+            script = "sleep 1; launchctl kickstart -k gui/\(getuid())/com.enprompt.app"
+        } else {
+            script = "sleep 1; open \"\(Bundle.main.bundlePath)\""
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", script]
+        try? process.run()
+        // Without launchd, make sure the old process does not linger.
+        if !LaunchAgentManager.isInstalled {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                exit(1)
+            }
+        }
+    }
+
+    func setLaunchAtLogin(_ enabled: Bool) {
+        launchAtLogin = enabled
+        if enabled {
+            LaunchAgentManager.install()
+        } else {
+            LaunchAgentManager.uninstall()
+        }
+    }
+
+    // MARK: - Enhance
+
+    /// Reads the focused text field, asks the LLM for an expanded version,
+    /// and writes it back. Falls back to the clipboard if write-back fails.
+    func enhanceFocusedText() async {
+        guard !isEnhancing else {
+            DebugLogger.log("ENHANCE SKIPPED: already enhancing")
+            return
+        }
+        guard AXService.isTrusted else {
+            enhancePhase = .error("Accessibility permission missing - grant it in enprompt Settings → Setup")
+            DebugLogger.log("ENHANCE SKIPPED: not trusted")
+            return
+        }
+        // The element is read a few times with a short delay: the window the
+        // user is typing in may still be settling focus right after the click.
+        var input: AXService.FocusedInput?
+        for attempt in 0..<3 {
+            input = AXService.focusedTextInput()
+            if input != nil { break }
+            DebugLogger.log("ENHANCE read attempt \(attempt + 1): no focused editable input yet")
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        guard let input else {
+            enhancePhase = .error("No editable text field is focused")
+            DebugLogger.log("ENHANCE SKIPPED: no focused editable input after retries — \(AXService.focusedElementDebugInfo())")
+            return
+        }
+        let bundleID = input.appPID > 0 ? NSRunningApplication(processIdentifier: input.appPID)?.bundleIdentifier : nil
+        let isTerminal = AXService.isTerminalApp(bundleID)
+
+        // If the user selected specific text, enhance ONLY that selection.
+        // Otherwise enhance the whole input.
+        let selection = AXService.selectedText(of: input.element)
+
+        var textToEnhance: String
+        var selectionLocation: Int?
+        var selectionLength: Int?
+        var fullInput: String
+        var terminalHasPrompt = true
+        if isTerminal {
+            let stripped = input.text.replacingOccurrences(
+                of: "\u{1B}\\[[0-9;]*[A-Za-z]",
+                with: "",
+                options: .regularExpression
+            )
+            let extracted = Self.extractTerminalInput(from: stripped)
+            textToEnhance = extracted.text
+            // Editor statuslines are filtered out above; a missing prompt
+            // marker just means write-back happens via the clipboard instead
+            // of in-place editing - never destructive.
+            terminalHasPrompt = extracted.hasPrompt
+            if !terminalHasPrompt {
+                DebugLogger.log("ENHANCE terminal: no shell prompt marker — clipboard write-back only")
+            }
+            // Safety net: never send UI chrome to the LLM or write it back.
+            if textToEnhance.isEmpty || textToEnhance.contains("ctrl+p") || textToEnhance.contains("OpenCode") || textToEnhance.contains("•") || textToEnhance.contains("·") {
+                DebugLogger.log("ENHANCE SKIPPED: terminal input line looks like UI chrome")
+                enhancePhase = .error("No input text found in the terminal prompt")
+                return
+            }
+            // A selection is used only when it is part of the input line.
+            if let selection, !selection.text.isEmpty {
+                let range = (textToEnhance as NSString).range(of: selection.text)
+                if range.length > 0 {
+                    selectionLocation = range.location
+                    selectionLength = range.length
+                }
+            }
+            fullInput = textToEnhance
+            if selectionLocation != nil, selectionLength != nil {
+                textToEnhance = (textToEnhance as NSString).substring(with: NSRange(location: selectionLocation!, length: selectionLength!))
+            }
+        } else {
+            fullInput = input.text
+            textToEnhance = input.text
+            // Any non-empty selection inside the focused field is enhanced.
+            if let selection, !selection.text.isEmpty {
+                selectionLocation = selection.location
+                selectionLength = selection.length
+                textToEnhance = selection.text
+            }
+        }
+
+        if selectionLocation != nil {
+            DebugLogger.log("ENHANCE using selection (\(selectionLength ?? 0) chars): \(textToEnhance.prefix(120))")
+        }
+
+        guard !textToEnhance.isEmpty else {
+            enhancePhase = .error("No input text found\(isTerminal ? " in the terminal prompt" : "")")
+            DebugLogger.log("ENHANCE SKIPPED: empty text")
+            return
+        }
+
+        isEnhancing = true
+        enhancePhase = .enhancing(0)
+        NSSound(named: "Tink")?.play()
+        defer { isEnhancing = false }
+
+        let startedAt = Date()
+        do {
+            DebugLogger.log("ENHANCING \(textToEnhance.count) chars (\(isTerminal ? "terminal" : "AX input")) via \(config.provider.rawValue)/\(config.model)")
+            if isTerminal {
+                DebugLogger.log("TERMINAL input line: \(textToEnhance.replacingOccurrences(of: "\n", with: "\\n").prefix(200))")
+            }
+            let enhanced = try await LLMClient.enhance(
+                textToEnhance,
+                config: config,
+                systemPrompt: systemPrompt
+            ) { [weak self] progress in
+                Task { @MainActor in
+                    self?.enhancePhase = .enhancing(progress)
+                }
+            }
+            guard !enhanced.isEmpty else { throw LLMError.emptyResponse }
+            let elapsed = String(format: "%.1f", Date().timeIntervalSince(startedAt))
+
+            if isTerminal {
+                // Terminal TUIs: caret to end (Ctrl+E), delete the whole old
+                // input line (backspace), paste the new line. If only a
+                // selection was enhanced, the new line keeps the untouched
+                // text around the selection.
+                let newLine: String
+                if let loc = selectionLocation, let len = selectionLength,
+                   (fullInput as NSString).length >= loc + len,
+                   (fullInput as NSString).substring(with: NSRange(location: loc, length: len)) == textToEnhance {
+                    newLine = (fullInput as NSString).replacingCharacters(
+                        in: NSRange(location: loc, length: len),
+                        with: enhanced
+                    )
+                } else {
+                    newLine = enhanced
+                }
+                if terminalHasPrompt {
+                    KeyboardInputService.replaceTerminalInput(
+                        newLine,
+                        deletingChars: fullInput.count,
+                        in: input.appPID
+                    )
+                    lastUndo = UndoRecord(
+                        element: input.element,
+                        appElement: input.appElement,
+                        appPID: input.appPID,
+                        isTerminal: true,
+                        originalText: fullInput,
+                        date: Date()
+                    )
+                    enhancePhase = .success("Replaced terminal input: \(textToEnhance.count) → \(enhanced.count) chars (\(elapsed)s)")
+                    DebugLogger.log("ENHANCED terminal input \(textToEnhance.count) -> \(enhanced.count) chars in \(elapsed)s (Ctrl+E, backspace x\(fullInput.count), paste)")
+                } else {
+                    // No shell prompt on the line (custom prompt shape or a
+                    // program that hides it): never edit in place - paste.
+                    KeyboardInputService.pasteReplacingCurrentText(newLine, in: input.appPID)
+                    enhancePhase = .success("Copied to clipboard: \(textToEnhance.count) → \(enhanced.count) chars (\(elapsed)s) - paste it after your prompt")
+                    DebugLogger.log("ENHANCED terminal input \(textToEnhance.count) -> \(enhanced.count) chars in \(elapsed)s (clipboard - no shell prompt)")
+                }
+                NSSound(named: "Glass")?.play()
+            } else {
+                // Try the accessibility write, then verify it actually applied.
+                // If a selection was enhanced, splice into the field's current
+                // value at the selection range instead of replacing it all.
+                let current = AXService.value(of: input.element) ?? fullInput
+                let target: String
+                if let loc = selectionLocation, let len = selectionLength,
+                   (current as NSString).length >= loc + len,
+                   (current as NSString).substring(with: NSRange(location: loc, length: len)) == textToEnhance {
+                    target = (current as NSString).replacingCharacters(
+                        in: NSRange(location: loc, length: len),
+                        with: enhanced
+                    )
+                } else {
+                    target = enhanced
+                }
+                let replaced = AXService.replaceText(target, in: input.element)
+                    && AXService.value(of: input.element) == target
+
+            if replaced {
+                lastUndo = UndoRecord(
+                    element: input.element,
+                    appElement: input.appElement,
+                    appPID: input.appPID,
+                    isTerminal: false,
+                    originalText: fullInput,
+                    date: Date()
+                )
+                enhancePhase = .success("Expanded \(textToEnhance.count) → \(enhanced.count) chars (\(elapsed)s)")
+                NSSound(named: "Glass")?.play()
+                DebugLogger.log("ENHANCED \(textToEnhance.count) -> \(enhanced.count) chars in \(elapsed)s (AX write-back verified)")
+            } else {
+                // AX write-back failed or silently did nothing: simulate
+                // Command-A + Command-V, which works in every app.
+                AXService.focus(input.element, in: input.appElement)
+                var appPID: pid_t = 0
+                AXUIElementGetPid(input.element, &appPID)
+                KeyboardInputService.pasteReplacingCurrentText(enhanced, in: appPID == 0 ? nil : appPID)
+                lastUndo = UndoRecord(
+                    element: input.element,
+                    appElement: input.appElement,
+                    appPID: input.appPID,
+                    isTerminal: false,
+                    originalText: fullInput,
+                    date: Date()
+                )
+                enhancePhase = .success("Expanded + pasted \(enhanced.count) chars (\(elapsed)s)")
+                NSSound(named: "Glass")?.play()
+                DebugLogger.log("ENHANCED \(textToEnhance.count) -> \(enhanced.count) chars in \(elapsed)s (keyboard paste fallback)")
+            }
+            }
+        } catch {
+            enhancePhase = .error((error as? LLMError)?.userFacingMessage ?? "Something went wrong while enhancing. Please try again.")
+            NSSound(named: "Sosumi")?.play()
+            DebugLogger.log("ENHANCE FAILED: \(error.localizedDescription)")
+        }
+    }
+
+    /// Sends a tiny probe through the provider detected from the CURRENT key
+    /// in the field (not the stored one) to verify the key is valid.
+    func testLLM() async {
+        guard !apiKey.isEmpty else {
+            testStatus = EnhanceStatus(isError: true, message: "Paste an API key first")
+            return
+        }
+        guard let provider = detectedProvider else {
+            testStatus = EnhanceStatus(isError: true, message: LLMError.unknownProvider.errorDescription ?? "Unknown provider")
+            return
+        }
+        testStatus = EnhanceStatus(isError: false, message: "Testing \(provider.displayName)…")
+        let probe = LLMConfig(provider: provider, model: provider.defaultModel, apiKey: apiKey, baseURL: provider.defaultBaseURL)
+        do {
+            try await LLMClient.validate(config: probe)
+            testStatus = EnhanceStatus(isError: false, message: "Key is valid - \(provider.displayName) connected")
+            DebugLogger.log("LLM TEST OK (\(provider.rawValue))")
+        } catch {
+            testStatus = EnhanceStatus(isError: true, message: (error as? LLMError)?.userFacingMessage ?? "Couldn't reach the provider. Please try again.")
+            DebugLogger.log("LLM TEST FAILED: \(error.localizedDescription)")
+        }
+    }
+
+    /// Saves the typed API key ONLY after the provider is detected and the key
+    /// validates against the real API. Returns true when saved.
+    func saveAPIKey(_ key: String) async -> Bool {
+        apiKey = key
+        guard let provider = detectedProvider else {
+            testStatus = EnhanceStatus(isError: true, message: LLMError.unknownProvider.errorDescription ?? "Unknown provider")
+            return false
+        }
+        let probe = LLMConfig(provider: provider, model: provider.defaultModel, apiKey: key, baseURL: provider.defaultBaseURL)
+        do {
+            try await LLMClient.validate(config: probe)
+        } catch {
+            testStatus = EnhanceStatus(isError: true, message: (error as? LLMError)?.userFacingMessage ?? "Your key was rejected. Please try again.")
+            DebugLogger.log("SAVE LLM REJECTED: \(error.localizedDescription)")
+            return false
+        }
+        self.provider = provider
+        model = provider.defaultModel
+        baseURL = provider.defaultBaseURL
+        persistConfig()
+        llmSetupExpanded = false
+        testStatus = nil
+        DebugLogger.log("LLM SAVED: \(provider.displayName) (\(model))")
+        return true
+    }
+
+    /// Restores the text as it was before the last enhancement. Called when
+    /// the user presses Cmd+Z / Ctrl+Z. Returns true when the key should be
+    /// swallowed (an enhancement was actually undone); false lets the key pass
+    /// through to the focused app as a normal undo.
+    func undoLastEnhancement() -> Bool {
+        guard let undo = lastUndo else { return false }
+        lastUndo = nil
+        guard Date().timeIntervalSince(undo.date) < 30 else { return false }
+
+        // Only restore when the user is still in the same field we enhanced.
+        guard let focused = AXService.focusedTextInput(),
+              CFEqual(focused.element, undo.element) else {
+            DebugLogger.log("UNDO SKIPPED: focused field changed")
+            return false
+        }
+
+        if undo.isTerminal {
+            let stripped = focused.text.replacingOccurrences(
+                of: "\u{1B}\\[[0-9;]*[A-Za-z]",
+                with: "",
+                options: .regularExpression
+            )
+            let currentLine = Self.extractTerminalInput(from: stripped).text
+            KeyboardInputService.replaceTerminalInput(
+                undo.originalText,
+                deletingChars: currentLine.count,
+                in: undo.appPID
+            )
+        } else {
+            let restored = AXService.replaceText(undo.originalText, in: undo.element)
+                && AXService.value(of: undo.element) == undo.originalText
+            if !restored {
+                AXService.focus(undo.element, in: undo.appElement)
+                KeyboardInputService.pasteReplacingCurrentText(
+                    undo.originalText,
+                    in: undo.appPID > 0 ? undo.appPID : nil
+                )
+            }
+        }
+        enhancePhase = .success("Restored original text")
+        NSSound(named: "Glass")?.play()
+        DebugLogger.log("UNDO: restored \(undo.originalText.count) chars (was \(focused.text.count))")
+        return true
+    }
+
+    // MARK: - Terminal input extraction
+
+    /// Scans the terminal screen text (ANSI-stripped) from the bottom and
+    /// returns the current input line:
+    /// 1. A line starting with a prompt marker (❯ > ➜ → λ › $ %) is a
+    ///    shell/claude-code/codex input - take the text after it.
+    /// 2. Lines that look like TUI chrome (opencode status bars contain
+    ///    "·"/"•"/"ctrl+p"/"OpenCode", borders and progress bars start with
+    ///    ┃│╹▀⬝■▣) are skipped.
+    /// 3. The first remaining line is the input.
+    /// Extracts the user's current input line from a terminal screen dump.
+    /// `hasPrompt` is false when no shell prompt marker was found (e.g. the
+    /// bottom line is an editor statusline) - callers must not write back
+    /// destructively in that case.
+    static func extractTerminalInput(from stripped: String) -> (text: String, hasPrompt: Bool) {
+        let promptMarkers = ["❯", ">", "➜", "→", "λ", "›", "$", "%"]
+        let lines = stripped.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        for line in lines.reversed() {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let leading = trimmed.drop(while: { $0 == " " || $0 == "\t" })
+
+            if let marker = promptMarkers.first(where: { leading.hasPrefix($0) }) {
+                let text = String(leading.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
+                if !text.isEmpty { return (text, true) }
+                continue
+            }
+            // Custom prompts ("user@mb ~ % ls"): the prompt marker ends the
+            // prompt. Use the LAST marker that follows whitespace - never one
+            // embedded inside the command ("echo 100%").
+            var markerStart: String.Index?
+            var scan = leading.startIndex
+            while scan < leading.endIndex {
+                let ch = leading[scan]
+                if promptMarkers.contains(String(ch)) {
+                    let precededBySpace = scan == leading.startIndex
+                        || leading[leading.index(before: scan)] == " "
+                    if precededBySpace { markerStart = scan }
+                }
+                scan = leading.index(after: scan)
+            }
+            if let markerStart {
+                let text = String(leading[leading.index(after: markerStart)...]).trimmingCharacters(in: .whitespaces)
+                if !text.isEmpty { return (text, true) }
+            }
+            if isTerminalChrome(trimmed) { continue }
+            // No prompt marker: never treat editor statuslines (vim shows
+            // "path:file line,col" or "file 203L, 4600C") as input.
+            if isEditorStatusLine(trimmed) { continue }
+            return (trimmed, false)
+        }
+        return ("", false)
+    }
+
+    /// True for vim/TUI statusline shapes: a path:file plus a line/col number,
+    /// or a file name with a length/position counter.
+    private static func isEditorStatusLine(_ line: String) -> Bool {
+        if line.range(of: #"\s+\d+[.,]\d+\s*$"#, options: .regularExpression) != nil { return true }
+        if line.range(of: #":\d+[.,]\d+"#, options: .regularExpression) != nil { return true }
+        if line.range(of: #"\d+L, \d+C"#, options: .regularExpression) != nil { return true }
+        let modeWords = ["All", "Insert", "Normal", "Visual", "Replace", "Command-line", "Recording", "recording", "Terminal-Focus", "Terminal"]
+        if modeWords.contains(where: { line.contains($0) }) { return true }
+        return false
+    }
+
+    private static let terminalChromeParts = ["·", "•", "ctrl+p", "OpenCode", "esc ", "commands", "OpenCode Zen"]
+
+    /// True when a terminal screen line is TUI chrome (status bars, headers,
+    /// borders, progress bars) rather than user input.
+    private static func isTerminalChrome(_ line: String) -> Bool {
+        if terminalChromeParts.contains(where: { line.contains($0) }) { return true }
+        let borderPrefixes = ["┃", "│", "╹", "▀", "⬝", "■", "▣", "─", "╱", "╲"]
+        let leading = line.drop(while: { $0 == " " || $0 == "\t" })
+        if let first = leading.first, borderPrefixes.contains(String(first)) { return true }
+        if line.range(of: #"\d+(\.\d+)?[KMG]? \("#, options: .regularExpression) != nil { return true }
+        return false
+    }
+
+    // MARK: - Dictation (hold Option to speak)
+
+    func startDictation() async {
+        guard !isListening, !isEnhancing else { return }
+        let (mic, speech) = await SpeechTranscriber.requestPermissions()
+        guard mic else {
+            enhancePhase = .error("Microphone permission denied - enable it in System Settings")
+            DebugLogger.log("DICTATION FAILED: no microphone permission")
+            return
+        }
+        guard speech else {
+            enhancePhase = .error("Speech recognition permission denied")
+            DebugLogger.log("DICTATION FAILED: no speech recognition permission")
+            return
+        }
+
+        isListening = true
+        dictationFinished = false
+        dictationSession += 1
+        let session = dictationSession
+        enhancePhase = .listening("")
+        DebugLogger.log("DICTATION STARTED (session \(session))")
+
+        transcriber.onPartial = { [weak self] text in
+            Task { @MainActor in
+                self?.enhancePhase = .listening(text)
+            }
+        }
+        transcriber.onFinal = { [weak self] result in
+            Task { @MainActor in
+                self?.finishDictation(result: result, session: session)
+            }
+        }
+        transcriber.start()
+    }
+
+    func stopDictation() {
+        transcriber.stop()
+    }
+
+    private func finishDictation(result: Result<String, Error>, session: Int) {
+        // Ignore callbacks from a previous dictation session (a late final
+        // result must never paste text on its own or start a new session).
+        guard session == dictationSession else { return }
+        guard !dictationFinished else { return }
+        dictationFinished = true
+        isListening = false
+        switch result {
+        case .success(let text):
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                enhancePhase = .error("No speech detected")
+                DebugLogger.log("DICTATION: no speech")
+                return
+            }
+            DebugLogger.log("DICTATED \(trimmed.count) chars: \(trimmed.prefix(120))")
+
+            // Insert the transcript at the cursor of the focused field.
+            if let input = AXService.focusedTextInput() {
+                var appPID: pid_t = 0
+                AXUIElementGetPid(input.element, &appPID)
+                KeyboardInputService.pasteText(trimmed, in: appPID == 0 ? nil : appPID)
+                enhancePhase = .success("Dictated \(trimmed.count) chars")
+                DebugLogger.log("DICTATION INSERTED into focused field")
+            } else {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(trimmed, forType: .string)
+                enhancePhase = .success("Dictated \(trimmed.count) chars - copied to clipboard")
+                DebugLogger.log("DICTATION: no focused field, copied to clipboard")
+            }
+        case .failure(let error):
+            enhancePhase = .error((error as? LLMError)?.userFacingMessage ?? "Dictation didn't go through. Please try again.")
+            DebugLogger.log("DICTATION FAILED: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Visual capture (triple-tap ⌥ → draw → speak → prompt)
+
+    func setVisualCaptureEnabled(_ enabled: Bool) {
+        visualCaptureEnabled = enabled
+        defaults.set(enabled, forKey: "visualCaptureEnabled")
+    }
+
+    /// Entry point from the triple-tap: remembers the focused field, then
+    /// shows the drawing canvas.
+    func startVisualCapture() {
+        guard visualCaptureEnabled else {
+            DebugLogger.log("VISUAL CAPTURE: disabled in Settings")
+            return
+        }
+        guard config.isConfigured else {
+            enhancePhase = .error("Add an API key in Settings first")
+            DebugLogger.log("VISUAL CAPTURE: no LLM configured")
+            return
+        }
+        guard !isListening, !isEnhancing else { return }
+
+        if !ScreenCapture.isAuthorized {
+            ScreenCapture.requestPermission()
+            enhancePhase = .error("Screen Recording permission needed - allow it in Settings → Setup (enprompt restarts itself)")
+            DebugLogger.log("VISUAL CAPTURE: no screen recording permission")
+            return
+        }
+
+        visualCaptureFocus = AXService.focusedTextInput()
+        visualCaptureDone = false
+        DebugLogger.log("VISUAL CAPTURE: showing canvas")
+
+        canvas.onFinish = { [weak self] strokes, transcript in
+            self?.canvasFinished(strokes: strokes, transcript: transcript)
+        }
+        canvas.onCancelled = { [weak self] in
+            DebugLogger.log("VISUAL CAPTURE: cancelled")
+            self?.enhancePhase = .idle
+        }
+        canvas.show()
+    }
+
+    /// The canvas is done: capture the annotated screenshot, ask the vision
+    /// model for the perfect prompt, paste it, and save it to history.
+    private func canvasFinished(strokes: [CanvasStroke], transcript: String) {
+        guard !visualCaptureDone else { return }
+        visualCaptureDone = true
+        let focus = visualCaptureFocus
+        visualCaptureFocus = nil
+
+        DebugLogger.log("VISUAL CAPTURE: \(strokes.count) strokes + '\(transcript.prefix(120))'")
+        guard let screen = NSScreen.main else { return }
+
+        Task {
+            enhancePhase = .enhancing(0)
+            guard
+                let jpeg = ScreenCapture.captureFullScreenJPEG(maxDimension: 800, quality: 0.6),
+                let image = CGImageSourceCreateWithData(jpeg as CFData, nil).flatMap({
+                    CGImageSourceCreateImageAtIndex($0, 0, nil)
+                })
+            else {
+                enhancePhase = .error("Screen capture failed - allow Screen Recording in Settings → Setup")
+                DebugLogger.log("VISUAL CAPTURE: capture returned nil")
+                return
+            }
+            let annotated = ScreenCapture.composite(
+                strokes: strokes,
+                screenSize: screen.frame.size,
+                onto: image
+            )
+            let rep = NSBitmapImageRep(cgImage: annotated)
+            guard let annotatedJPEG = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.6]) else {
+                enhancePhase = .error("Screen capture failed")
+                return
+            }
+
+            do {
+                let prompt = try await LLMClient.promptWithVision(
+                    instruction: transcript,
+                    imageData: annotatedJPEG,
+                    config: config
+                )
+                let targetPID = focus.flatMap { $0.appPID } ?? 0
+                KeyboardInputService.pasteText(prompt, in: targetPID == 0 ? nil : targetPID)
+                saveCapturedPrompt(prompt)
+                enhancePhase = .success("Visual prompt pasted + saved (\(prompt.count) chars)")
+                DebugLogger.log("VISUAL CAPTURE: pasted + saved \(prompt.count) chars")
+            } catch {
+                enhancePhase = .error((error as? LLMError)?.userFacingMessage ?? "The AI couldn't read your drawing. Please try again.")
+                DebugLogger.log("VISUAL CAPTURE FAILED: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Esc while the visual-capture canvas is up: finish it. Routes through
+    /// the canvas even when the canvas window isn't the key window, and
+    /// swallows the key so the focused app doesn't react to it.
+    func handleVisualCaptureEscape() -> Bool {
+        guard canvas.isShowing else { return false }
+        DebugLogger.log("CANVAS: global Esc routed to canvas")
+        canvas.escapePressed()
+        return true
+    }
+
+    // MARK: - Captured prompts history
+
+    private func saveCapturedPrompt(_ prompt: String) {
+        capturedPrompts.insert(prompt, at: 0)
+        if capturedPrompts.count > 15 {
+            capturedPrompts.removeLast(capturedPrompts.count - 15)
+        }
+        defaults.set(capturedPrompts, forKey: "capturedPrompts")
+    }
+
+    func copyCapturedPrompt(at index: Int) {
+        guard capturedPrompts.indices.contains(index) else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(capturedPrompts[index], forType: .string)
+        DebugLogger.log("CAPTURED PROMPT copied (\(capturedPrompts[index].count) chars)")
+    }
+
+    func removeCapturedPrompt(at index: Int) {
+        guard capturedPrompts.indices.contains(index) else { return }
+        capturedPrompts.remove(at: index)
+        defaults.set(capturedPrompts, forKey: "capturedPrompts")
+        DebugLogger.log("CAPTURED PROMPT removed")
+    }
+}
