@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>enprompt — The prompt enhancer for macOS</title>
+<meta name="description" content="enprompt lives in your menu bar. Double-tap ⌥ to expand what you're typing, hold ⌥ and speak to dictate, triple-tap ⌥ to draw over your screen and turn it into a perfect prompt.">
+<link rel="icon" type="image/png" href="assets/icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="bg-orbs" aria-hidden="true">
+  <div class="orb orb-a"></div>
+  <div class="orb orb-b"></div>
+  <div class="orb orb-c"></div>
+  <div class="grid-lines"></div>
+  <div class="noise"></div>
+</div>
+
+<div id="cubes" class="cubes" aria-hidden="true"></div>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <a href="#top" class="brand">
+      <img src="assets/icon.png" alt="enprompt" class="brand-icon">
+      <span class="brand-name">enprompt</span>
+    </a>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#download">Install</a>
+      <a href="#how">Shortcuts</a>
+      <a href="#setup">FAQ</a>
+      <a href="https://github.com/aadityakumarsah/enprompt" target="_blank" rel="noopener">GitHub</a>
+    </div>
+    <a href="#download" class="btn btn-black nav-cta">Get enprompt</a>
+  </div>
+</nav>
+
+<header id="top" class="hero">
+  <div class="hero-inner">
+    <img src="assets/icon.png" alt="enprompt" class="hero-logo">
+    <h1 class="hero-title">
+      Write, dictate, and draw
+      <span class="gradient-text">from one key.</span>
+    </h1>
+    <p class="hero-sub">
+      enprompt lives in your menu bar — double-tap <span class="k">⌥</span> to expand any text,
+      hold <span class="k">⌥</span> to dictate, or triple-tap <span class="k">⌥</span> to turn
+      what's on your screen into the perfect prompt — then draw and annotate right on it.
+    </p>
+    <div class="hero-actions">
+      <button type="button" class="btn btn-black" id="hero-copy-btn">
+        <span class="terminal-icon">&gt;_</span> Copy install command
+      </button>
+      <a href="#download" class="btn btn-soft">See install steps <span class="down-arrow">⌄</span></a>
+    </div>
+    <div class="hero-meta">
+      <span>macOS 14+</span>
+      <span class="meta-dot">·</span>
+      <span>~3 MB</span>
+      <span class="meta-dot">·</span>
+      <span>1,200+ downloads</span>
+      <span class="meta-dot">·</span>
+      <span>100% free</span>
+    </div>
+  </div>
+</header>
+
+<section id="demo" class="demo">
+  <div class="demo-inner">
+    <div class="section-head">
+      <span class="section-tag">See it in action</span>
+      <h2>Your words, upgraded — live</h2>
+      <p>Watch enprompt rewrite, dictate, and capture in real time on a MacBook Air.</p>
+    </div>
+    <div class="macbook" id="macbook">
+      <div class="macbook-screen">
+        <div class="macbook-camera"></div>
+        <div class="window-bar">
+          <span class="window-dot red"></span>
+          <span class="window-dot yellow"></span>
+          <span class="window-dot green"></span>
+          <span class="window-title">enprompt — demo</span>
+        </div>
+        <div class="video-wrap">
+          <video id="demo-video" class="demo-video" autoplay muted loop playsinline preload="metadata">
+            <source src="assets/demo.mp4" type="video/mp4">
+          </video>
+        </div>
+      </div>
+      <div class="macbook-base">
+        <div class="macbook-notch"></div>
+        <div class="macbook-keyboard"></div>
+      </div>
+      <div class="macbook-shadow"></div>
+    </div>
+  </div>
+</section>
+
+<div class="marquee">
+  <div class="marquee-track">
+    <span>✦&nbsp; Expand</span><span>✦&nbsp; Dictate</span><span>✦&nbsp; Annotate</span><span>✦&nbsp; Undo</span><span>✦&nbsp; Presets</span><span>✦&nbsp; Private</span><span>✦&nbsp; Instant</span><span>✦&nbsp; Every app</span>
+    <span>✦&nbsp; Expand</span><span>✦&nbsp; Dictate</span><span>✦&nbsp; Annotate</span><span>✦&nbsp; Undo</span><span>✦&nbsp; Presets</span><span>✦&nbsp; Private</span><span>✦&nbsp; Instant</span><span>✦&nbsp; Every app</span>
+  </div>
+</div>
+
+<section id="features" class="features">
+  <div class="section-head">
+    <span class="section-tag">Features</span>
+    <h2>Everything you type, perfected</h2>
+    <p>Three gestures. Infinite superpowers. enprompt never leaves your menu bar.</p>
+  </div>
+  <div class="feature-grid">
+    <div class="feature-card reveal" data-icon="sparkles">
+      <div class="feature-icon">✦</div>
+      <h3>Expand your text</h3>
+      <p>Double-tap <span class="k">⌥</span> while typing anywhere — Notes, Slack, Chrome, Terminal — and enprompt reads the focused text field via the Accessibility API, sends your exact words to the model, and writes the result back in place. Grammar, spelling, punctuation, and flow are fixed; your meaning, intent, and tone are preserved exactly. The prompt contract is strict: output-only, no commentary, no markdown, no invented facts — and every edit is recorded, so <span class="k">⌘</span>+<span class="k">Z</span> restores the original even in apps with no undo support.</p>
+    </div>
+    <div class="feature-card reveal" data-icon="mic">
+      <div class="feature-icon">🎙</div>
+      <h3>Dictate by holding ⌥</h3>
+      <p>Hold <span class="k">⌥</span> for 1.25 seconds and a speech-recognition session starts — on-device, in 40+ languages, with a live transcript preview on screen. Release the key and your words are inserted at the cursor, then LLM-corrected in the same pass for punctuation and phrasing. No new windows, no tab switches, no clipboard dance: the text lands exactly where you were typing.</p>
+    </div>
+    <div class="feature-card reveal" data-icon="pen">
+      <div class="feature-icon">✏️</div>
+      <h3>Draw & capture</h3>
+      <p>Triple-tap <span class="k">⌥</span> to overlay a full-screen canvas above whatever you're working on. Circle, box, or scribble the element you mean with pen, shapes, or a laser pointer that fades as you move — and speak the change you want. Press Esc and enprompt sends the annotated screenshot plus your spoken instruction to a vision-capable model, then pastes one precise, self-contained prompt into your editor and saves it to history.</p>
+    </div>
+    <div class="feature-card reveal" data-icon="reply">
+      <div class="feature-icon">↩</div>
+      <h3>One-tap replies</h3>
+      <p>Choose a register from built-in presets — X posts, founder replies, email, concise, ultra-detailed, academic — select any text, and double-tap <span class="k">⌥</span>. enprompt rewrites it into a natural reply in that style, in your voice: no hashtag spam, no filler, no markdown, just the reply text ready to send.</p>
+    </div>
+    <div class="feature-card reveal" data-icon="undo">
+      <div class="feature-icon">↺</div>
+      <h3>Instant undo</h3>
+      <p>Every enhancement snapshots the exact pre-edit state, so <span class="k">⌘</span>+<span class="k">Z</span> within 30 seconds restores your original text character-for-character — even in apps that can't undo, like Terminal and custom editors. The shortcut is intercepted and swallowed, so it never leaks into the host application as an unwanted undo.</p>
+    </div>
+    <div class="feature-card reveal" data-icon="lock">
+      <div class="feature-icon">🔒</div>
+      <h3>Private by design</h3>
+      <p>Your API key lives in the macOS Keychain — never in files or defaults. Speech is transcribed on-device, not in the cloud. enprompt is a single ~3 MB menu-bar agent with no account, no telemetry, and no tracking: the only bytes that leave your Mac are the text you explicitly choose to send to your provider.</p>
+    </div>
+  </div>
+</section>
+
+<section id="how" class="how">
+  <div class="section-head">
+    <span class="section-tag">How it works</span>
+    <h2>Three gestures. One workflow.</h2>
+  </div>
+  <div class="steps">
+    <div class="step reveal">
+      <div class="step-num">01</div>
+      <div class="step-glyph"><span class="key">⌥</span><span class="key">⌥</span></div>
+      <h3>Expand</h3>
+      <p>Type something rough. Double-tap ⌥. Your text comes back polished — same meaning, better words.</p>
+    </div>
+    <div class="step-arrow">→</div>
+    <div class="step reveal">
+      <div class="step-num">02</div>
+      <div class="step-glyph"><span class="key">⌥</span><span class="key hold">hold 1.25s</span></div>
+      <h3>Dictate</h3>
+      <p>Hold ⌥, speak your thought, release. No tabs to open, no windows to switch — the text just appears.</p>
+    </div>
+    <div class="step-arrow">→</div>
+    <div class="step reveal">
+      <div class="step-num">03</div>
+      <div class="step-glyph"><span class="key">⌥</span><span class="key">⌥</span><span class="key">⌥</span></div>
+      <h3>Capture</h3>
+      <p>Triple-tap ⌥, circle the bug on your screen, say what to fix, hit Esc. A perfect prompt is pasted into your input and saved to history.</p>
+    </div>
+  </div>
+</section>
+
+<section id="setup" class="setup">
+  <div class="setup-inner">
+    <div class="section-head">
+      <span class="section-tag">Setup</span>
+      <h2>60 seconds. One time. Done.</h2>
+      <p>enprompt walks you through permissions once — then restarts itself when you're done. No more configuration, ever.</p>
+    </div>
+    <div class="setup-grid">
+      <div class="setup-card reveal">
+        <div class="setup-check">✓</div>
+        <h3>Accessibility</h3>
+        <p>Reads & writes text in any app, and powers the global ⌥ hotkeys.</p>
+      </div>
+      <div class="setup-card reveal">
+        <div class="setup-check">✓</div>
+        <h3>Screen Recording</h3>
+        <p>For the drawing canvas. The moment you allow it, enprompt restarts itself automatically.</p>
+      </div>
+      <div class="setup-card reveal">
+        <div class="setup-check">✓</div>
+        <h3>Microphone</h3>
+        <p>Push-to-talk dictation and canvas voice — requested up-front, never mid-flow.</p>
+      </div>
+      <div class="setup-card reveal">
+        <div class="setup-check">✓</div>
+        <h3>Speech Recognition</h3>
+        <p>On-device transcription so your words land at the cursor, private and fast.</p>
+      </div>
+    </div>
+    <div class="provider-strip reveal">
+      <span class="provider-label">Works with</span>
+      <span class="provider">Gemini</span><span class="dot">·</span>
+      <span class="provider">Claude</span><span class="dot">·</span>
+      <span class="provider">OpenAI</span><span class="dot">·</span>
+      <span class="provider">OpenRouter</span>
+      <span class="provider-note">— just paste your API key. enprompt detects the provider, validates the key, and saves it to your Keychain.</span>
+    </div>
+  </div>
+</section>
+
+<section id="download" class="cta">
+  <div class="cta-inner reveal">
+    <img src="assets/icon.png" alt="enprompt" class="cta-icon">
+    <h2>Make your writing effortless.</h2>
+    <p>Free forever. No account. No tracking. Just a wand in your menu bar.</p>
+    <div class="hero-guide" style="margin: 0 auto 34px;">
+      <div class="guide-step">
+        <span class="guide-num">1</span>
+        <p>Click <b>Copy install command</b> above — the install command is copied to your clipboard.</p>
+      </div>
+      <div class="guide-step">
+        <span class="guide-num">2</span>
+        <p>Open <b>Terminal</b>, paste with <span class="k">⌘</span>+<span class="k">V</span><img src="assets/icon.png" alt="enprompt" class="guide-logo">, and press <b>Return</b>.</p>
+      </div>
+      <div class="guide-step">
+        <span class="guide-num">3</span>
+        <p>enprompt downloads and opens — drag it into <b>Applications</b>.</p>
+      </div>
+    </div>
+    <div class="hero-actions">
+      <button type="button" class="btn btn-primary" id="copy-install-btn">Copy install command</button>
+      <a href="#how" class="btn btn-ghost">Learn the gestures</a>
+    </div>
+    <div class="install-box">
+      <code id="install-cmd">curl -L -o ~/Downloads/enprompt-1.8.dmg https://github.com/aadityakumarsah/enprompt/releases/download/v1.8/enprompt-1.8.dmg &amp;&amp; open ~/Downloads/enprompt-1.8.dmg</code>
+      <span id="install-copied" class="install-copied" hidden>Copied! Paste it in Terminal.</span>
+    </div>
+    <p class="cta-note">macOS 14+ · Apple Silicon · ~3 MB · open source on <a href="https://github.com/aadityakumarsah/enprompt" target="_blank" rel="noopener">GitHub</a></p>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div class="brand">
+      <img src="assets/icon.png" alt="enprompt" class="brand-icon">
+      <span class="brand-name">enprompt</span>
+    </div>
+    <p class="footer-tag">Tap ⌥ twice. Say it. Done.</p>
+    <p class="footer-copy">© 2026 enprompt. Made on a MacBook Air.</p>
+  </div>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>

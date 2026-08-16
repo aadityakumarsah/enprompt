@@ -1,6 +1,6 @@
-.wrangler/
-.DS_Store
 .build/
 build/
+.DS_Store
+# site source assets (never upload the 148MB original)
 enprompt-site/demo.mov
 enprompt-site/enprompt.dmg
