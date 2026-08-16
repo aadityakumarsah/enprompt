@@ -45,12 +45,11 @@ enum ScreenCapture {
     }
 
     /// Captures the whole main screen as JPEG (much smaller than PNG - faster
-/// uploads and vision processing).
+    /// uploads and vision processing).
     static func captureFullScreenJPEG(maxDimension: CGFloat = 1280, quality: CGFloat = 0.8) -> Data? {
         guard isAuthorized else { return nil }
         guard let screen = NSScreen.main else { return nil }
-        let bounds = screen.frame
-        let cgRect = CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height)
+        let cgRect = cgRect(for: screen)
         guard let image = CGWindowListCreateImage(
             cgRect,
             .optionOnScreenOnly,
@@ -76,10 +75,7 @@ enum ScreenCapture {
     static func captureFullScreenPNG(maxDimension: CGFloat = 1600) -> Data? {
         guard isAuthorized else { return nil }
         guard let screen = NSScreen.main else { return nil }
-        let bounds = screen.frame
-        // CG coordinates: top-left origin. Main screen top-left is 0,0.
-        let cgRect = CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height)
-        return capturePNG(rect: cgRect, maxDimension: maxDimension)
+        return capturePNG(rect: cgRect(for: screen), maxDimension: maxDimension)
     }
 
     /// Draws the user's canvas annotations (strokes in view coordinates with
@@ -153,6 +149,16 @@ enum ScreenCapture {
             ctx.strokePath()
         }
         return ctx.makeImage() ?? image
+    }
+
+    /// Converts an AppKit screen frame (bottom-left origin, global point
+    /// space) into CGWindowListCreateImage coordinates (top-left origin on the
+    /// primary display). Without this, screens positioned away from the origin
+    /// would capture the wrong region.
+    private static func cgRect(for screen: NSScreen) -> CGRect {
+        let frame = screen.frame
+        let primaryHeight = NSScreen.screens.first { $0.frame.origin == .zero }?.frame.height ?? frame.height
+        return CGRect(x: frame.minX, y: primaryHeight - frame.maxY, width: frame.width, height: frame.height)
     }
 
     private static func resize(_ image: CGImage, to size: CGSize) -> CGImage? {

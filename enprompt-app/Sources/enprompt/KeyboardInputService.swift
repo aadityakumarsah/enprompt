@@ -42,7 +42,7 @@ enum KeyboardInputService {
         let deletes = min(count, 8000)
         for _ in 0..<deletes {
             postKey(keyCode: 51, flags: []) // Backspace
-            usleep(3_000)
+            usleep(2_000)
         }
         usleep(100_000)
         postKey(keyCode: 9, flags: .maskCommand) // Command-V: paste

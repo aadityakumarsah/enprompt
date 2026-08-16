@@ -15,11 +15,21 @@ final class SpeechTranscriber {
     private let engine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
+    /// Monotonic session id: a recognition task finishing after a newer
+    /// session started must be dropped, or its stale transcript would be
+    /// delivered as if it belonged to the current session.
+    private var session = 0
 
     var isRunning: Bool { engine.isRunning }
 
     func start() {
         guard !engine.isRunning else { return }
+        session += 1
+        let thisSession = session
+        // A task from a previous session may still be finalizing after stop();
+        // cancel it so its result can never leak into this session.
+        task?.cancel()
+        task = nil
         guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable else {
             onFinal?(.failure(NSError(
                 domain: "enprompt.STT",
@@ -34,17 +44,18 @@ final class SpeechTranscriber {
         self.request = request
 
         task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            guard let self, self.session == thisSession else { return }
             if let result {
                 let text = result.bestTranscription.formattedString
                 if result.isFinal {
-                    self?.task = nil
-                    self?.onFinal?(.success(text))
+                    self.task = nil
+                    self.onFinal?(.success(text))
                 } else {
-                    self?.onPartial?(text)
+                    self.onPartial?(text)
                 }
             } else if let error {
-                self?.task = nil
-                self?.onFinal?(.failure(error))
+                self.task = nil
+                self.onFinal?(.failure(error))
             }
         }
 

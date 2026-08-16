@@ -64,6 +64,17 @@ struct EnpromptMenuView: View {
             }
             .frame(maxWidth: .infinity)
 
+            Button {
+                Task { await state.enhanceFocusedText() }
+            } label: {
+                Label("Enhance focused text", systemImage: "wand.and.stars")
+                    .font(.callout)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(state.isEnhancing)
+            .help("Runs the same enhancement as a ⌥⌥ double-tap - handy when the gesture misses")
+
             if state.isEnhancing {
                 HStack(spacing: 6) {
                     ProgressView()
@@ -121,6 +132,29 @@ struct EnpromptMenuView: View {
                 }
                 Divider()
             }
+
+            HStack(spacing: 6) {
+                Text("Tokens")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+                Text("≈\(state.sessionTokens.formatted()) this session")
+                    .font(.caption)
+                Text("·")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("≈\(state.totalTokens.formatted()) total")
+                    .font(.caption)
+                Spacer()
+                Button("Reset") {
+                    state.resetTokenUsage()
+                }
+                .controlSize(.mini)
+                .buttonStyle(.borderless)
+                .help("Reset the token counters")
+            }
+
+            Divider()
 
             HStack(spacing: 8) {
                 Circle()

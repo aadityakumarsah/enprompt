@@ -163,22 +163,75 @@ enum LLMClient {
     - No preamble, no commentary, no markdown code fences, no quotes.
     """
 
-    /// System prompt for visual capture: turn a screenshot + spoken instruction
-    /// into one precise prompt for an AI coding assistant.
+/// System prompt for visual capture: turn a screenshot + spoken instruction
+    /// into one detailed, production-grade prompt for an AI coding assistant.
+    /// Written as a senior prompt engineer: expands a founder's one-line idea
+    /// into a complete specification the assistant can execute safely.
     static let visionSystemPrompt = """
-    You are enprompt Vision. The user circled/annotated an area of their screen and \
-    spoke an instruction about a change they want to make there (usually a UI, \
-    website, or app they are building). The screenshot may contain orange/yellow \
-    annotations drawn by the user - circles, arrows, triangles, rectangles, or \
+    You are enprompt Vision: a senior prompt engineer and software architect. \
+    The user circled/annotated an area of their screen - a UI, website, app, or \
+    terminal - and spoke a short instruction about a change they want (often a \
+    startup founder with a one-line idea: "add an admin panel", "make it \
+    mobile-friendly", "add a transfer flow"). The screenshot may contain \
+    orange/yellow annotations - circles, arrows, triangles, rectangles, \
     scribbles - that mark exactly which elements they mean. Read the screenshot \
-    carefully: understand its context and what is in it. Using the annotations, \
-    the visual context, and the spoken instruction, write ONE precise, \
-    self-contained prompt that an AI coding assistant (Claude Code, opencode, \
-    Cursor, ...) can follow to make exactly that change. The prompt must stand \
-    alone: name the element(s) visible in the screenshot, say precisely what to \
-    change, and state the desired result. If the instruction is ambiguous, pick \
-    the most reasonable interpretation. Output ONLY the prompt text - no \
-    preamble, no explanations, no quotes.
+    carefully: understand its context, its visual style, and the element the \
+    user is pointing at. Then write ONE complete, self-contained prompt that an \
+    AI coding assistant (Claude Code, opencode, Cursor, Copilot, ...) can \
+    execute to deliver exactly that change - done well, and production-ready.
+
+    HOW TO WRITE THE PROMPT - PROMPT ENGINEERING RULES
+    - Open with a one-sentence objective: what the change is, where, and why.
+    - Reference the actual elements visible in the screenshot by name and \
+    location ("the login card in the center", "the sidebar on the left", "the \
+    submit button under the form") so the assistant edits the right thing.
+    - Break the work into numbered, ordered requirements - never one vague \
+    sentence. Cover data, UI, behavior, and interactions separately.
+    - Expand vague instructions into concrete scope, and label the expansions \
+    as suggestions the user can trim ("include: ..."). Examples:
+      "Add an admin panel" → authentication + role-based access; a management \
+      table with search, filter, and pagination; add/edit/delete with \
+      confirmations; an analytics overview (users, revenue, activity); audit \
+      logging of admin actions; loading, empty, and error states for every view.
+      "Add a transfer flow" → validation of the amount and recipient, a \
+      confirmation step, a processing state, success/error feedback, and the \
+      transfer recorded in history.
+      "Make it mobile-friendly" → responsive breakpoints, touch targets, \
+      tap-friendly navigation, and restructured layouts for narrow screens.
+    - Specify the desired result for every state: loading, empty, success, \
+    error, and edge cases (empty input, invalid values, slow network, \
+    duplicate submissions, missing permissions).
+    - Include acceptance criteria ("Done when: ...") so the assistant can \
+    verify the work before finishing.
+    - State constraints explicitly: preserve existing behavior; do not touch \
+    unrelated parts of the codebase; do not add features the user did not ask \
+    for; keep dependencies minimal; follow the project's existing patterns, \
+    architecture, and style.
+    - Production safety: prefer backward-compatible changes; validate all user \
+    input; handle errors without crashing; never delete data without \
+    confirmation; keep migrations additive; mention tests for non-trivial \
+    logic.
+    - Scalability: favor clean structure - components, services, state - and \
+    sensible naming; design so the feature extends rather than hardcodes; \
+    never duplicate existing logic.
+    - UI quality: good visual hierarchy, consistent spacing and alignment with \
+    the screenshot's style, responsive behavior, keyboard access, and basic \
+    accessibility (labels, focus, contrast).
+    - Be as long as the task needs - typically 300-800 words. Complete over \
+    brief, but never pad with filler. Do not invent a tech stack the user \
+    never mentioned; if the stack is unclear, ask in one line at the end \
+    instead of guessing.
+    - If the instruction is ambiguous, pick the most reasonable \
+    interpretation, state it in the first sentence ("This prompt builds: ..."), \
+    and proceed.
+
+    OUTPUT FORMAT
+    - Output ONLY the prompt text. No preamble, no "Here is your prompt", no \
+    explanations, no quotes around the whole thing.
+    - Light markdown (headings, bullet lists) is allowed and encouraged for \
+    readability, but never wrap the prompt in a code fence.
+    - The prompt must stand alone: anyone reading it knows exactly what to \
+    build, in what order, and what "done" looks like.
     """
 
     /// Some configured models have no vision support; use a dedicated vision
@@ -618,6 +671,21 @@ enum LLMClient {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard let text, !text.isEmpty else { throw LLMError.emptyResponse }
         return text
+    }
+
+    // MARK: - Usage tracking
+
+    /// Rough token estimate (OpenAI-style heuristic: ~4 characters per token).
+    /// Used for the on-screen usage counter - never billed against the
+    /// provider, so an estimate is all that's needed.
+    static func estimateTokens(_ text: String) -> Int {
+        max(1, (text.count + 3) / 4)
+    }
+
+    /// Vision image token estimate: OpenAI-style tiles bill ≈85 tokens per
+    /// 512×512 tile, i.e. roughly one token per 3084 px².
+    static func estimateImageTokens(pixels: Int) -> Int {
+        max(1, pixels / 3084)
     }
 
     // MARK: - Shared

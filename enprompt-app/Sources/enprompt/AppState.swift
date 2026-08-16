@@ -69,6 +69,11 @@ final class AppState: ObservableObject {
     private var visualCaptureDone = false
     private var visualCaptureFocus: AXService.FocusedInput?
 
+    /// Estimated LLM tokens consumed (never billed - see LLMClient estimates).
+    /// Session resets at launch; total persists so users can see lifetime use.
+    @Published private(set) var sessionTokens = 0
+    @Published private(set) var totalTokens: Int
+
     private let defaults = UserDefaults.standard
 
     /// The pre-rename default system prompt ("You are Treki…"): stored configs
@@ -80,6 +85,7 @@ final class AppState: ObservableObject {
         // Must be assigned before any other self use.
         visualCaptureEnabled = defaults.object(forKey: "visualCaptureEnabled") as? Bool ?? true
         capturedPrompts = defaults.stringArray(forKey: "capturedPrompts") ?? []
+        totalTokens = defaults.integer(forKey: "tokenUsageTotal")
         if let raw = defaults.string(forKey: "provider"), let provider = LLMProvider(rawValue: raw) {
             self.provider = provider
         }
@@ -205,11 +211,33 @@ final class AppState: ObservableObject {
 
     func setLaunchAtLogin(_ enabled: Bool) {
         launchAtLogin = enabled
+        // Persist the choice: on launch the app only reinstalls the agent
+        // when this flag isn't explicitly false (see AppDelegate).
+        defaults.set(enabled, forKey: "launchAtLoginEnabled")
         if enabled {
             LaunchAgentManager.install()
         } else {
             LaunchAgentManager.uninstall()
         }
+    }
+
+    // MARK: - Token usage
+
+    /// Adds an estimated token count for one LLM exchange (prompt + completion,
+    /// plus optional vision image pixels) to the session and lifetime counters.
+    func recordUsage(promptText: String, completionText: String, imagePixels: Int? = nil) {
+        let used = LLMClient.estimateTokens(promptText)
+            + LLMClient.estimateTokens(completionText)
+            + (imagePixels.map { LLMClient.estimateImageTokens(pixels: $0) } ?? 0)
+        sessionTokens += used
+        totalTokens += used
+        defaults.set(totalTokens, forKey: "tokenUsageTotal")
+    }
+
+    func resetTokenUsage() {
+        sessionTokens = 0
+        totalTokens = 0
+        defaults.set(0, forKey: "tokenUsageTotal")
     }
 
     // MARK: - Enhance
@@ -327,6 +355,7 @@ final class AppState: ObservableObject {
                 }
             }
             guard !enhanced.isEmpty else { throw LLMError.emptyResponse }
+            recordUsage(promptText: systemPrompt + "\n" + textToEnhance, completionText: enhanced)
             let elapsed = String(format: "%.1f", Date().timeIntervalSince(startedAt))
 
             if isTerminal {
@@ -731,7 +760,7 @@ final class AppState: ObservableObject {
         Task {
             enhancePhase = .enhancing(0)
             guard
-                let jpeg = ScreenCapture.captureFullScreenJPEG(maxDimension: 800, quality: 0.6),
+                let jpeg = ScreenCapture.captureFullScreenJPEG(maxDimension: 700, quality: 0.5),
                 let image = CGImageSourceCreateWithData(jpeg as CFData, nil).flatMap({
                     CGImageSourceCreateImageAtIndex($0, 0, nil)
                 })
@@ -756,6 +785,11 @@ final class AppState: ObservableObject {
                     instruction: transcript,
                     imageData: annotatedJPEG,
                     config: config
+                )
+                recordUsage(
+                    promptText: LLMClient.visionSystemPrompt + "\n" + transcript,
+                    completionText: prompt,
+                    imagePixels: rep.pixelsWide * rep.pixelsHigh
                 )
                 let targetPID = focus.flatMap { $0.appPID } ?? 0
                 KeyboardInputService.pasteText(prompt, in: targetPID == 0 ? nil : targetPID)

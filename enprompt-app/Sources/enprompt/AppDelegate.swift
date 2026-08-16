@@ -33,9 +33,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             instanceLockFD = fd
         }
 
-        // Always-on: register with launchd so enprompt starts at login and keeps
-        // running (restart on crash) until the user disables it in Settings.
-        LaunchAgentManager.install()
+        // Always-on by default: register with launchd so enprompt starts at login
+        // and keeps running (restart on crash). Never override an explicit
+        // "Start at login = off" from Settings - the toggle stores its choice
+        // in UserDefaults, so a disabled agent stays disabled across launches.
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "launchAtLoginEnabled") == nil || defaults.bool(forKey: "launchAtLoginEnabled") {
+            LaunchAgentManager.install()
+        }
 
         statusItemController = StatusItemController()
         statusItemController?.install()

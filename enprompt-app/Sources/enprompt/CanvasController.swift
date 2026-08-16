@@ -189,6 +189,7 @@ private final class CanvasView: NSView {
     }
 
     @objc private func undoClicked() {
+        guard !strokes.isEmpty else { return }
         strokes.removeLast()
         needsDisplay = true
     }

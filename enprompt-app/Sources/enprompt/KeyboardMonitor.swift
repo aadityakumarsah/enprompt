@@ -173,6 +173,24 @@ final class KeyboardMonitor {
             return Unmanaged.passUnretained(event)
         }
 
+        // A character key pressed while Option is held is an Option-combo shortcut
+        // (⌥+B in Terminal, ⌥+⌫ word-delete, accented typing, ...), not an
+        // enprompt gesture. Drop every tap/hold candidate so the combo can
+        // never trigger a double-tap, triple-tap, or dictation.
+        if type == .keyDown, event.flags.contains(.maskAlternate) {
+            let holdWasActive: Bool
+            if let down = optionDownAt {
+                holdWasActive = CFAbsoluteTimeGetCurrent() - down >= Self.holdThreshold
+                    && CFAbsoluteTimeGetCurrent() - lastDoubleTapAt > 1.5
+            } else {
+                holdWasActive = false
+            }
+            resetGestureState()
+            if holdWasActive {
+                onOptionHoldEnd?()
+            }
+        }
+
         // Cmd+Z / Ctrl+Z: undo the last enhancement when there is one.
         if type == .keyDown,
            event.getIntegerValueField(.keyboardEventKeycode) == KeyboardMonitor.zKeyCode,
