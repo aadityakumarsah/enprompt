@@ -145,6 +145,22 @@ final class KeyboardMonitor {
                 }
                 holdCheckWork = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + Self.holdThreshold, execute: work)
+            } else if event.flags.contains(.maskAlternate) {
+                // Option is still down but another modifier is now held
+                // (⌥⌘, ⌥⇧, ⌥⌃, …). This is not an enprompt gesture: cancel
+                // every pending activation and stop dictation that may have
+                // already started, so Option only works when pressed alone.
+                let holdWasActive: Bool
+                if let down = optionDownAt {
+                    holdWasActive = CFAbsoluteTimeGetCurrent() - down >= Self.holdThreshold
+                        && CFAbsoluteTimeGetCurrent() - lastDoubleTapAt > 1.5
+                } else {
+                    holdWasActive = false
+                }
+                resetGestureState()
+                if holdWasActive {
+                    onOptionHoldEnd?()
+                }
             } else if !event.flags.contains(.maskAlternate), let down = optionDownAt {
                 // Option went up after being held.
                 holdCheckWork?.cancel()
@@ -191,5 +207,16 @@ final class KeyboardMonitor {
     private func isPlainOptionTap(_ event: CGEvent) -> Bool {
         let common: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn]
         return event.flags.intersection(common) == [.maskAlternate]
+    }
+
+    /// Discards all in-flight gesture state so nothing can activate.
+    private func resetGestureState() {
+        pendingDoubleTapWork?.cancel()
+        pendingDoubleTapWork = nil
+        holdCheckWork?.cancel()
+        holdCheckWork = nil
+        optionDownAt = nil
+        lastOptionTapAt = nil
+        secondLastOptionTapAt = nil
     }
 }
