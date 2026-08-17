@@ -51,6 +51,7 @@ final class CanvasController: NSObject {
     private(set) var isShowing = false
 
     func show() {
+        guard !isShowing else { return }
         guard let screen = NSScreen.main else { return }
         isShowing = true
         let frame = screen.frame

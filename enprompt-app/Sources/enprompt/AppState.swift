@@ -1345,6 +1345,12 @@ final class AppState: ObservableObject {
             return
         }
         guard !isListening, !isEnhancing else { return }
+        // The canvas is already up: another triple-tap must never stack a
+        // second fullscreen canvas window.
+        guard !canvas.isShowing else {
+            DebugLogger.log("VISUAL CAPTURE: canvas already showing - ignoring triple-tap")
+            return
+        }
 
         if !ScreenCapture.isAuthorized {
             Task { await ScreenCapture.requestPermission() }
