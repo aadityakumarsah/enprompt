@@ -129,27 +129,61 @@ enum AXService {
         if let element = attributeElement(system, kAXFocusedUIElementAttribute) {
             return element
         }
-        if let app = attributeElement(system, kAXFocusedApplicationAttribute) {
-            if let window = attributeElement(app, kAXFocusedWindowAttribute),
-               let el = attributeElement(window, kAXFocusedUIElementAttribute) {
-                return el
-            }
-            if let el = attributeElement(app, kAXFocusedUIElementAttribute) {
-                return el
-            }
+        if let app = attributeElement(system, kAXFocusedApplicationAttribute),
+           let el = focusedElement(in: app) {
+            return el
         }
         if let wsApp = NSWorkspace.shared.frontmostApplication,
            wsApp.processIdentifier != getpid() {
             let app = AXUIElementCreateApplication(wsApp.processIdentifier)
-            if let window = attributeElement(app, kAXFocusedWindowAttribute),
-               let el = attributeElement(window, kAXFocusedUIElementAttribute) {
-                return el
-            }
-            if let el = attributeElement(app, kAXFocusedUIElementAttribute) {
+            if let el = focusedElement(in: app) {
                 return el
             }
         }
+        // Some apps (notably Chrome) report no AX focus info at all. Hit-test
+        // at the mouse position instead - the user just selected text, so the
+        // cursor is right there. Skip elements that belong to enprompt itself
+        // (e.g. the popover when it is open).
+        if let point = mousePositionInAXCoordinates(),
+           let hit = hitTest(at: point) {
+            var pid: pid_t = 0
+            AXUIElementGetPid(hit, &pid)
+            if pid != getpid() {
+                return hit
+            }
+        }
         return nil
+    }
+
+    private static func focusedElement(in app: AXUIElement) -> AXUIElement? {
+        if let window = attributeElement(app, kAXFocusedWindowAttribute),
+           let el = attributeElement(window, kAXFocusedUIElementAttribute) {
+            return el
+        }
+        if let el = attributeElement(app, kAXFocusedUIElementAttribute) {
+            return el
+        }
+        return nil
+    }
+
+    private static func hitTest(at point: CGPoint) -> AXUIElement? {
+        var element: AXUIElement?
+        let result = AXUIElementCopyElementAtPosition(
+            AXUIElementCreateSystemWide(),
+            Float(point.x),
+            Float(point.y),
+            &element
+        )
+        guard result == .success, let element else { return nil }
+        return element
+    }
+
+    /// The current mouse location in AX coordinates (top-left origin of the
+    /// main display). NSEvent.mouseLocation uses a bottom-left origin.
+    private static func mousePositionInAXCoordinates() -> CGPoint? {
+        guard let screen = NSScreen.main else { return nil }
+        let mouse = NSEvent.mouseLocation
+        return CGPoint(x: mouse.x, y: screen.frame.height - mouse.y)
     }
 
     // MARK: - Text replacement
@@ -308,6 +342,14 @@ enum AXService {
         }
 
         if let wsApp = NSWorkspace.shared.frontmostApplication {
+            if let point = mousePositionInAXCoordinates(),
+               let hit = hitTest(at: point) {
+                var pid: pid_t = 0
+                AXUIElementGetPid(hit, &pid)
+                if pid != getpid() {
+                    return describe(hit, source: "mouse hit-test (frontmost \(wsApp.localizedName ?? "?")")
+                }
+            }
             return "frontmost app=\(wsApp.localizedName ?? "?") (pid \(wsApp.processIdentifier)), no AX focus info"
         }
 

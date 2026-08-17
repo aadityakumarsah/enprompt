@@ -96,6 +96,14 @@ final class AppState: ObservableObject {
 
     private let defaults = UserDefaults.standard
 
+    /// The last text selection seen anywhere (a tweet, an article...), so a
+    /// selection made just before opening the popover can still be used even
+    /// though the popover itself has focus by then. Refreshed every second
+    /// while another app is frontmost.
+    @Published private(set) var lastSelection: String? = nil
+    private var lastSelectionDate = Date.distantPast
+    private var selectionWatcher: Timer?
+
     /// The pre-rename default system prompt ("You are Treki…"): stored configs
     /// that still hold it are migrated to the new default on launch.
     static let legacyDefaultSystemPrompt = LLMClient.defaultSystemPrompt
@@ -141,6 +149,38 @@ final class AppState: ObservableObject {
         if systemPrompt == Self.legacyDefaultSystemPrompt {
             systemPrompt = LLMClient.defaultSystemPrompt
         }
+        startSelectionWatcher()
+    }
+
+    /// Watches for text selections in the frontmost app so a selection made
+    /// just before the popover opens is not lost when focus moves.
+    private func startSelectionWatcher() {
+        selectionWatcher?.invalidate()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self,
+                  !self.isEnhancing,
+                  let front = NSWorkspace.shared.frontmostApplication,
+                  front.processIdentifier != getpid() else { return }
+            guard let selection = AXService.focusedSelection(), !selection.isEmpty else { return }
+            self.lastSelection = selection
+            self.lastSelectionDate = Date()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        selectionWatcher = timer
+    }
+
+    /// Best-effort read of the user's current text selection: the live AX
+    /// selection, then the recently cached one (selection survives the popover
+    /// stealing focus), then nil.
+    private func bestSelectionText() -> String? {
+        if let selection = AXService.focusedSelection(), !selection.isEmpty {
+            return selection
+        }
+        if let cached = lastSelection, !cached.isEmpty,
+           Date().timeIntervalSince(lastSelectionDate) < 60 {
+            return cached
+        }
+        return nil
     }
 
     var config: LLMConfig {
@@ -457,11 +497,11 @@ final class AppState: ObservableObject {
             // Fallback: the user selected text OUTSIDE any editable field
             // (a tweet, a post, an article). Enhance that selection and put
             // the result on the clipboard so it can be pasted anywhere.
-            if let selection = AXService.focusedSelection(), !selection.isEmpty {
+            if let selection = bestSelectionText() {
                 await enhanceToClipboard(selection)
                 return
             }
-            enhancePhase = .error("No editable text field is focused")
+            enhancePhase = .error("No text found — select the text first (or copy it with ⌘C) and try again")
             DebugLogger.log("ENHANCE SKIPPED: no focused editable input after retries — \(AXService.focusedElementDebugInfo())")
             return
         }
@@ -719,15 +759,22 @@ final class AppState: ObservableObject {
             return
         }
 
-        // 1. The selection anywhere (editable or read-only).
-        var source = AXService.focusedSelection()
+        // 1. The selection anywhere (editable or read-only), live or cached.
+        var source = bestSelectionText()
         if source == nil || source!.isEmpty {
             // 2. Fall back to the focused editable field's text.
             source = AXService.focusedTextInput()?.text
         }
+        if source == nil || source!.isEmpty {
+            // 3. Last resort: whatever the user copied to the clipboard.
+            source = NSPasteboard.general.string(forType: .string)
+            if let s = source, !s.isEmpty {
+                DebugLogger.log("REPLY using clipboard text (\(s.count) chars)")
+            }
+        }
         guard let text = source?.trimmingCharacters(in: .whitespacesAndNewlines),
               !text.isEmpty else {
-            enhancePhase = .error("Select the post text first, then press Prepare reply")
+            enhancePhase = .error("Select the post text first (or copy it with ⌘C), then press Prepare reply")
             DebugLogger.log("REPLY SKIPPED: no selection — \(AXService.focusedElementDebugInfo())")
             return
         }
