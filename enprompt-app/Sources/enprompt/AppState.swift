@@ -184,9 +184,10 @@ final class AppState: ObservableObject {
         selectionWatcher = timer
     }
 
-    /// Best-effort read of the user's current text selection: the live AX
-    /// selection, then the recently cached one (selection survives the popover
-    /// stealing focus), then nil.
+    /// Best-effort read of the selection for the Prepare-reply flow: the live
+    /// AX selection, then the recently cached one (selection survives the
+    /// popover stealing focus). The cached path is only used by Prepare
+    /// reply - plain Enhance never touches it.
     private func bestSelectionText() -> String? {
         if let selection = AXService.focusedSelection(), !selection.isEmpty {
             return selection
@@ -603,15 +604,16 @@ final class AppState: ObservableObject {
         }
         guard let input else {
             // Fallback: the user selected text OUTSIDE any editable field
-            // (a tweet, a post, an article). Enhance that selection and put
-            // the result on the clipboard so it can be pasted anywhere.
-            if let selection = bestSelectionText() {
+            // (a tweet, a post, an article). Only a LIVE selection counts -
+            // never an old cached one, so Enhance never works on text the
+            // user can't see. The result lands on the clipboard.
+            if let selection = AXService.focusedSelection(), !selection.isEmpty {
                 await enhanceToClipboard(selection)
                 return
             }
             enhancePhase = .error(EnhanceError(
                 title: "No text found",
-                guidance: "Select the text you want to work with first (or copy it with ⌘C and try again).",
+                guidance: "Select the text you want to work with first, then try again.",
                 fix: nil
             ))
             DebugLogger.log("ENHANCE SKIPPED: no focused editable input after retries — \(AXService.focusedElementDebugInfo())")

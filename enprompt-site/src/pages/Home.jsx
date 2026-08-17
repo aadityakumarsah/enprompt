@@ -7,7 +7,7 @@ import CopyButton from '../components/CopyButton'
 import { useRevealOnScroll } from '../hooks/useRevealOnScroll'
 
 const INSTALL_CMD =
-  'curl -L -o ~/Downloads/enprompt-1.9.9.dmg https://github.com/aadityakumarsah/enprompt/releases/download/v1.9.9/enprompt-1.9.9.dmg && open ~/Downloads/enprompt-1.9.9.dmg'
+  'curl -L -o ~/Downloads/enprompt-1.9.10.dmg https://github.com/aadityakumarsah/enprompt/releases/download/v1.9.10/enprompt-1.9.10.dmg && open ~/Downloads/enprompt-1.9.10.dmg'
 
 const FEATURES = [
   {
