@@ -242,11 +242,11 @@ final class AppState: ObservableObject {
 
     // MARK: - Updates
 
-    /// Checks GitHub for a newer release. `force` bypasses the 12-hour
-    /// auto-check throttle (menu button); otherwise called once per launch.
+    /// Checks GitHub for a newer release. `force` bypasses the hourly auto-check
+    /// throttle; auto-checks run at launch, every 6 hours, and on popover open.
     func checkForUpdates(force: Bool = false) async {
         guard !isCheckingForUpdate, updateInfo == nil else { return }
-        if !force, Date().timeIntervalSince(lastUpdateCheck) < 12 * 3600 { return }
+        if !force, Date().timeIntervalSince(lastUpdateCheck) < 3600 { return }
         isCheckingForUpdate = true
         defer { isCheckingForUpdate = false }
         do {

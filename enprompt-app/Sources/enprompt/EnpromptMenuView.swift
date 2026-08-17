@@ -96,47 +96,7 @@ struct EnpromptMenuView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            if let update = state.updateInfo {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .foregroundStyle(.blue)
-                        Text("enprompt \(update.version) is available")
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                        Spacer()
-                        Button("Later") { state.dismissUpdate() }
-                            .buttonStyle(.borderless)
-                            .controlSize(.mini)
-                    }
-                    HStack(spacing: 8) {
-                        Button {
-                            state.downloadAndInstallUpdate()
-                        } label: {
-                            if state.isDownloadingUpdate {
-                                ProgressView()
-                                    .controlSize(.mini)
-                                    .frame(width: 50)
-                            } else {
-                                Label("Update now", systemImage: "arrow.down.circle")
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .disabled(state.isDownloadingUpdate)
-                        Text("Replaces the app and relaunches - no reinstall.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.blue.opacity(0.08))
-                )
-                Divider()
-            }
+            Divider()
 
             Divider()
 
@@ -219,11 +179,36 @@ struct EnpromptMenuView: View {
             }
             .help("Click to change the API key or provider")
 
-            HStack {
-                Button("Check for Updates…") {
-                    Task { await state.checkForUpdates(force: true) }
+                        if let update = state.updateInfo {
+                HStack(spacing: 8) {
+                    Label("enprompt \(update.version) available", systemImage: "arrow.down.circle.fill")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.blue)
+                        .lineLimit(1)
+                    Spacer()
+                    Button {
+                        state.downloadAndInstallUpdate()
+                    } label: {
+                        if state.isDownloadingUpdate {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .frame(width: 44)
+                        } else {
+                            Label("Update now", systemImage: "arrow.down.circle")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(state.isDownloadingUpdate)
+                    .help("Downloads the update, replaces this app, and relaunches")
+                    Button("Later") { state.dismissUpdate() }
+                        .buttonStyle(.borderless)
+                        .controlSize(.mini)
                 }
-                .controlSize(.small)
+            }
+
+            HStack {
                 Spacer()
                 Button("Settings…") {
                     openSettings()
@@ -241,7 +226,10 @@ struct EnpromptMenuView: View {
         }
         .padding()
         .frame(width: 340)
-        .onAppear { state.refreshTrust() }
+        .onAppear {
+            state.refreshTrust()
+            Task { await state.checkForUpdates() }
+        }
     }
 
     private var trustBadge: some View {
