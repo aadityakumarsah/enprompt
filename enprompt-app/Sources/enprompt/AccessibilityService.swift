@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import Foundation
 
@@ -51,11 +52,35 @@ enum AXService {
         guard isTrusted else { return nil }
 
         let system = AXUIElementCreateSystemWide()
-        guard let app = attributeElement(system, kAXFocusedApplicationAttribute) else {
-            return nil
-        }
-        let appName = attribute(app, kAXTitleAttribute) as? String
 
+        // 1. The system-wide focused element directly (most reliable across
+        //    apps; the app is derived from the element's own PID).
+        if let element = attributeElement(system, kAXFocusedUIElementAttribute),
+           let (editable, role) = findEditableElement(from: element) {
+            return makeFocusedInput(element: editable, role: role)
+        }
+
+        // 2. The focused application, then its focused window / element.
+        if let app = attributeElement(system, kAXFocusedApplicationAttribute),
+           let input = focusedInput(in: app) {
+            return input
+        }
+
+        // 3. NSWorkspace frontmost app. Covers menu-bar / LSUIElement apps
+        //    (including enprompt itself) where kAXFocusedApplicationAttribute
+        //    is reported as nil on some macOS versions.
+        if let wsApp = NSWorkspace.shared.frontmostApplication,
+           wsApp.processIdentifier != getpid() {
+            let app = AXUIElementCreateApplication(wsApp.processIdentifier)
+            if let input = focusedInput(in: app) {
+                return input
+            }
+        }
+
+        return nil
+    }
+
+    private static func focusedInput(in app: AXUIElement) -> FocusedInput? {
         var candidate: AXUIElement?
         if let window = attributeElement(app, kAXFocusedWindowAttribute),
            let el = attributeElement(window, kAXFocusedUIElementAttribute) {
@@ -63,16 +88,20 @@ enum AXService {
         } else if let el = attributeElement(app, kAXFocusedUIElementAttribute) {
             candidate = el
         }
-        guard let element = candidate else { return nil }
+        guard let element = candidate,
+              let (editable, role) = findEditableElement(from: element) else {
+            return nil
+        }
+        return makeFocusedInput(element: editable, role: role)
+    }
 
-        // If the focused element itself isn't editable, walk up to the nearest
-        // editable ancestor (covers web content and embedded views).
-        guard let (editable, role) = findEditableElement(from: element) else { return nil }
-
-        let text = attribute(editable, kAXValueAttribute) as? String ?? ""
-        var appPID: pid_t = 0
-        AXUIElementGetPid(app, &appPID)
-        return FocusedInput(element: editable, appElement: app, appPID: appPID, role: role, text: text, appName: appName)
+    private static func makeFocusedInput(element: AXUIElement, role: String) -> FocusedInput {
+        let text = attribute(element, kAXValueAttribute) as? String ?? ""
+        var pid: pid_t = 0
+        AXUIElementGetPid(element, &pid)
+        let app = pid > 0 ? AXUIElementCreateApplication(pid) : nil
+        let appName = app.flatMap { attribute($0, kAXTitleAttribute) as? String }
+        return FocusedInput(element: element, appElement: app, appPID: pid, role: role, text: text, appName: appName)
     }
 
     // MARK: - Text replacement
@@ -210,22 +239,37 @@ enum AXService {
     static func focusedElementDebugInfo() -> String {
         guard isTrusted else { return "not trusted" }
         let system = AXUIElementCreateSystemWide()
-        guard let app = attributeElement(system, kAXFocusedApplicationAttribute) else {
-            return "no focused app"
+
+        if let element = attributeElement(system, kAXFocusedUIElementAttribute) {
+            return describe(element, source: "system-wide focused element")
         }
-        let appName = attribute(app, kAXTitleAttribute) as? String ?? "?"
-        var candidate: AXUIElement?
-        if let window = attributeElement(app, kAXFocusedWindowAttribute),
-           let el = attributeElement(window, kAXFocusedUIElementAttribute) {
-            candidate = el
-        } else if let el = attributeElement(app, kAXFocusedUIElementAttribute) {
-            candidate = el
-        }
-        guard let el = candidate else {
+
+        if let app = attributeElement(system, kAXFocusedApplicationAttribute) {
+            let appName = attribute(app, kAXTitleAttribute) as? String ?? "?"
+            var candidate: AXUIElement?
+            if let window = attributeElement(app, kAXFocusedWindowAttribute),
+               let el = attributeElement(window, kAXFocusedUIElementAttribute) {
+                candidate = el
+            } else if let el = attributeElement(app, kAXFocusedUIElementAttribute) {
+                candidate = el
+            }
+            if let el = candidate {
+                return describe(el, source: "app=\(appName)")
+            }
             return "app=\(appName), no focused element"
         }
-        let role = attribute(el, kAXRoleAttribute) as? String ?? "?"
-        let subrole = attribute(el, kAXSubroleAttribute) as? String ?? ""
-        return "app=\(appName), focusedRole=\(role)\(subrole.isEmpty ? "" : " (\(subrole))")"
+
+        if let wsApp = NSWorkspace.shared.frontmostApplication {
+            return "frontmost app=\(wsApp.localizedName ?? "?") (pid \(wsApp.processIdentifier)), no AX focus info"
+        }
+
+        return "no focused app"
+    }
+
+    private static func describe(_ element: AXUIElement, source: String) -> String {
+        let role = attribute(element, kAXRoleAttribute) as? String ?? "?"
+        let subrole = attribute(element, kAXSubroleAttribute) as? String ?? ""
+        let editable = editableCheck(element) != nil ? ", editable=yes" : ""
+        return "\(source), focusedRole=\(role)\(subrole.isEmpty ? "" : " (\(subrole))")\(editable)"
     }
 }
