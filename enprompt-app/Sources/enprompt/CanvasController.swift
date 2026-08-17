@@ -174,7 +174,7 @@ private final class CanvasView: NSView {
         extra("Undo (Z)", #selector(undoClicked), "z")
         extra("Clear (C)", #selector(clearClicked), "c")
 
-        let hint = NSTextField(labelWithString: "Draw & speak · Esc = generate & save")
+        let hint = NSTextField(labelWithString: "Draw & speak · Esc = generate, save & copy")
         hint.frame = NSRect(x: 10, y: bounds.height - 88, width: bounds.width - 20, height: 20)
         hint.alignment = .center
         hint.font = .systemFont(ofSize: 12, weight: .medium)

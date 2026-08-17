@@ -1,3 +1,4 @@
 #!/bin/sh
 cd "$(dirname "$0")"
-exec /usr/bin/python3 -m http.server 8000
+# Dev server with SPA fallback (routes: / and /run-locally)
+exec npm run dev

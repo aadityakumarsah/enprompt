@@ -4,3 +4,6 @@
 build/
 enprompt-site/demo.mov
 enprompt-site/enprompt.dmg
+enprompt-site/node_modules/
+enprompt-site/dist/
+enprompt-app/enprompt-*.dmg

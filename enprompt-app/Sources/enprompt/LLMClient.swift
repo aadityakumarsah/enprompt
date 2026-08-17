@@ -64,6 +64,10 @@ struct LLMConfig {
     var model: String = LLMProvider.anthropic.defaultModel
     var apiKey: String = ""
     var baseURL: String = LLMProvider.anthropic.defaultBaseURL
+    /// Optional model used for visual capture (⌥⌥⌥). Empty string falls back
+    /// to the provider's default (LLMClient.visionModel(for:)) - set from the
+    /// Settings picker so local Ollama vision models like qwen2.5vl can be used.
+    var visionModel: String = ""
 
     var isConfigured: Bool { !apiKey.isEmpty && !model.isEmpty }
 }
@@ -247,6 +251,33 @@ enum LLMClient {
         }
     }
 
+    /// Known vision-capable model families. The Settings model picker uses
+    /// this to mark which locally installed Ollama models can read screenshots.
+    static func isVisionModel(_ name: String) -> Bool {
+        let hints = ["qwen2.5vl", "qwen2-vl", "llava", "vision", "moondream",
+                     "minicpm", "phi-3-vision", "bakllava", "gemma3"]
+        let lower = name.lowercased()
+        return hints.contains(where: lower.contains)
+    }
+
+    /// Lists the models installed on the local Ollama server (GET /api/tags),
+    /// so Settings can offer them in a dropdown instead of hardcoding names.
+    /// Returns model names (e.g. "qwen2.5vl:7b", "llama3.2:latest") sorted.
+    static func fetchOllamaModels(baseURL: String) async throws -> [String] {
+        // The OpenAI-compatible base ends in /v1; the tag listing lives at /api.
+        let host = baseURL.hasSuffix("/v1") ? String(baseURL.dropLast(3)) : baseURL
+        var request = URLRequest(url: URL(string: "\(host)/api/tags")!)
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        let (data, response) = try await session.data(for: request)
+        try checkHTTP(response: response, data: data)
+        struct Response: Decodable {
+            struct Model: Decodable { let name: String }
+            let models: [Model]
+        }
+        let decoded = try JSONDecoder().decode(Response.self, from: data)
+        return decoded.models.map(\.name).sorted()
+    }
+
     /// Sends the circled screenshot plus the spoken instruction to a
     /// vision-capable model and returns the generated prompt.
     static func promptWithVision(
@@ -254,7 +285,11 @@ enum LLMClient {
         imageData: Data,
         config: LLMConfig
     ) async throws -> String {
-        let model = visionModel(for: config.provider)
+        // A model explicitly picked in Settings wins; otherwise fall back to
+        // the provider's default vision model.
+        let model = config.visionModel.isEmpty
+            ? visionModel(for: config.provider)
+            : config.visionModel
         let userPrompt: String
         if instruction.isEmpty {
             userPrompt = """
@@ -269,29 +304,91 @@ enum LLMClient {
             Use the annotations and the screenshot to write the prompt as instructed.
             """
         }
+        let result: String
         switch config.provider {
         case .anthropic:
-            return try await callAnthropicVision(
+            result = try await callAnthropicVision(
                 prompt: userPrompt,
                 imageData: imageData,
                 config: config,
                 model: model
             )
         case .openAI, .openRouter, .ollama:
-            return try await callOpenAIVision(
-                prompt: userPrompt,
+            // Local models like qwen2.5vl tend to answer chatty ("Sure, here's
+            // how you could…") instead of outputting only the prompt - hammer
+            // the rule home in the user turn, then strip leftovers.
+            let strict = userPrompt + """
+
+            IMPORTANT: Output ONLY the prompt text itself. No preamble, no \
+            "Sure, here's how", no "Here is your prompt", no closing remarks, \
+            no explanations.
+            """
+            result = try await callOpenAIVision(
+                prompt: config.provider == .ollama ? strict : userPrompt,
                 imageData: imageData,
                 config: config,
                 model: model
             )
         case .gemini:
-            return try await callGeminiVision(
+            result = try await callGeminiVision(
                 prompt: userPrompt,
                 imageData: imageData,
                 config: config,
                 model: model
             )
         }
+        // Local models sometimes still preface their answer despite the rules.
+        if config.provider == .ollama {
+            return stripVisionPreamble(from: result)
+        }
+        return result
+    }
+
+    /// Removes chatty "Sure, here's how…" / "Here is your prompt…" lead-ins and
+    /// trailing wrap-ups that local vision models add around the actual prompt.
+    static func stripVisionPreamble(from text: String) -> String {
+        var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Some local models wrap the prompt in a code fence (```json … ```) -
+        // unwrap it so the field receives plain text.
+        if t.hasPrefix("```") {
+            if let nl = t.range(of: "\n") {
+                t = String(t[nl.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                t = ""
+            }
+            if t.hasSuffix("```") {
+                t = String(t.dropLast(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        let preambleMarkers = [
+            "sure, here", "here's how", "here is how", "here's your",
+            "here is your", "here's a prompt", "here is a prompt", "certainly",
+            "of course", "no problem", "absolutely", "great",
+        ]
+        for _ in 0..<3 {
+            let lower = t.lowercased()
+            guard preambleMarkers.contains(where: lower.hasPrefix) else { break }
+            // Drop through the first line break after the preamble, if any.
+            guard let nl = t.range(of: "\n") else { break }
+            let after = String(t[nl.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !after.isEmpty else { break }
+            t = after
+        }
+        // Trailing wrap-ups ("This aligns with the original instruction…",
+        // "Hope this helps!", "Good luck!") add nothing - drop them.
+        let tailMarkers = [
+            "this aligns with", "this should", "this will", "hope this helps",
+            "hope that helps", "good luck", "let me know if", "feel free to",
+        ]
+        while true {
+            let lines = t.split(separator: "\n", omittingEmptySubsequences: false)
+            guard let last = lines.last else { break }
+            let tail = String(last).trimmingCharacters(in: .whitespacesAndNewlines)
+            let lowerTail = tail.lowercased()
+            guard !tail.isEmpty, tailMarkers.contains(where: lowerTail.hasPrefix) else { break }
+            t = lines.dropLast().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return t
     }
 
     /// Alternative presets selectable in Settings (Admin panel).
@@ -674,6 +771,40 @@ enum LLMClient {
     }
 
     // MARK: - Usage tracking
+
+    /// Sends a minimal request so Ollama loads the model into memory. The
+    /// first real request after `ollama pull` pays a multi-second load; doing
+    /// it while the canvas is still open makes Esc → prompt feel instant.
+    static func warmUp(baseURL: String, model: String) async throws {
+        var request = URLRequest(url: URL(string: "\(baseURL)/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("Bearer ollama", forHTTPHeaderField: "authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "max_tokens": 1,
+            "messages": [["role": "user", "content": "warm"]],
+        ])
+        let (_, response) = try await session.data(for: request)
+        try checkHTTP(response: response, data: Data())
+    }
+
+    /// Pulls a model via Ollama's HTTP API (POST /api/pull) - no shelling out
+    /// to the `ollama` CLI, which GUI apps can't rely on being on PATH.
+    /// Completes when the download finishes; a 6 GB vision model can take
+    /// several minutes, so this uses a dedicated, much longer timeout.
+    static func pullOllamaModel(_ name: String, baseURL: String) async throws {
+        let host = baseURL.hasSuffix("/v1") ? String(baseURL.dropLast(3)) : baseURL
+        var request = URLRequest(url: URL(string: "\(host)/api/pull")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["name": name, "stream": false])
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 3600
+        config.timeoutIntervalForResource = 3600
+        let (data, response) = try await URLSession(configuration: config).data(for: request)
+        try checkHTTP(response: response, data: data)
+    }
 
     /// Rough token estimate (OpenAI-style heuristic: ~4 characters per token).
     /// Used for the on-screen usage counter - never billed against the

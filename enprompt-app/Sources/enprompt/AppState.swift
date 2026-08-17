@@ -32,6 +32,9 @@ final class AppState: ObservableObject {
     @Published var model: String = LLMProvider.anthropic.defaultModel
     @Published var baseURL: String = LLMProvider.anthropic.defaultBaseURL
     @Published var apiKey: String = ""
+    /// Model used for visual capture (⌥⌥⌥) when the user picked one in
+    /// Settings; empty means "use the provider's default vision model".
+    @Published var visionModel: String = ""
     @Published var systemPrompt: String = LLMClient.defaultSystemPrompt
     /// The setup form stays collapsed once an API key is saved; clicking the
     /// status indicator expands it again to change the key/provider.
@@ -74,6 +77,13 @@ final class AppState: ObservableObject {
     @Published private(set) var sessionTokens = 0
     @Published private(set) var totalTokens: Int
 
+    /// Models installed on the local Ollama server (via GET /api/tags), for
+    /// the Settings model picker. Empty while loading / when Ollama is off.
+    @Published var ollamaModels: [String] = []
+    @Published var ollamaModelError: String?
+    /// Non-nil while a model download is in progress (shown in Settings).
+    @Published var ollamaPullStatus: String?
+
     private let defaults = UserDefaults.standard
 
     /// The pre-rename default system prompt ("You are Treki…"): stored configs
@@ -104,6 +114,7 @@ final class AppState: ObservableObject {
             model = provider.defaultModel
         }
         baseURL = defaults.string(forKey: "baseURL") ?? provider.defaultBaseURL
+        visionModel = defaults.string(forKey: "visionModel") ?? ""
         apiKey = KeychainStore.load() ?? ""
         // First launch under the new bundle id: carry the API key over from the
         // old com.treki.app keychain entry and drop the old entry.
@@ -123,7 +134,7 @@ final class AppState: ObservableObject {
     }
 
     var config: LLMConfig {
-        LLMConfig(provider: provider, model: model, apiKey: apiKey, baseURL: baseURL)
+        LLMConfig(provider: provider, model: model, apiKey: apiKey, baseURL: baseURL, visionModel: visionModel)
     }
 
     /// The provider inferred from the key currently in the field. nil when the
@@ -138,9 +149,88 @@ final class AppState: ObservableObject {
         defaults.set(provider.rawValue, forKey: "provider")
         defaults.set(model, forKey: "model")
         defaults.set(baseURL, forKey: "baseURL")
+        defaults.set(visionModel, forKey: "visionModel")
         defaults.set(systemPrompt, forKey: "systemPrompt")
         if !apiKey.isEmpty {
             KeychainStore.save(apiKey)
+        }
+    }
+
+    /// Fetches the models installed on the local Ollama server so the Settings
+    /// pickers can offer them. Safe to call anytime - errors just leave the
+    /// list empty with a friendly message.
+    func loadOllamaModels() async {
+        guard provider == .ollama else { return }
+        ollamaModels = []
+        ollamaModelError = nil
+        do {
+            let models = try await LLMClient.fetchOllamaModels(baseURL: baseURL)
+            ollamaModels = models
+            // If the user never picked a vision model, default to the first
+            // vision-capable one - sending a screenshot to a text-only model
+            // (e.g. llama3.2) is exactly how "AI provider rejected the
+            // request" errors happen.
+            if visionModel.isEmpty,
+               let firstVision = models.first(where: LLMClient.isVisionModel) {
+                visionModel = firstVision
+                persistConfig()
+                DebugLogger.log("OLLAMA: auto-picked vision model \(firstVision)")
+            }
+            DebugLogger.log("OLLAMA: found \(ollamaModels.count) local models: \(ollamaModels.joined(separator: ", "))")
+        } catch {
+            ollamaModelError = (error as? LLMError)?.userFacingMessage ?? "Couldn't reach the Ollama server - is it running?"
+            DebugLogger.log("OLLAMA: model list failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Downloads a model through the local Ollama server so a brand-new user
+    /// needs zero terminal commands to get going. Shows progress in Settings.
+    func pullOllamaModel(_ name: String) async {
+        guard ollamaPullStatus == nil else { return }
+        ollamaPullStatus = "Downloading \(name) - this can take a few minutes…"
+        ollamaModelError = nil
+        DebugLogger.log("OLLAMA: pulling \(name)")
+        do {
+            try await LLMClient.pullOllamaModel(name, baseURL: baseURL)
+            ollamaPullStatus = nil
+            await loadOllamaModels()
+            ollamaModelError = "\(name) is installed and ready to use"
+            DebugLogger.log("OLLAMA: pulled \(name)")
+        } catch {
+            ollamaPullStatus = nil
+            ollamaModelError = "Download failed - check your internet connection and try again"
+            DebugLogger.log("OLLAMA: pull \(name) failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Opens the free Ollama download page - the first step for a new user
+    /// who has never installed anything AI-related.
+    func openOllamaDownload() {
+        if let url = URL(string: "https://ollama.com/download") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Launches the Ollama menu-bar app (macOS apps can't trust PATH, so the
+    /// app path is used directly).
+    func startOllamaApp() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Ollama.app"))
+    }
+
+    /// Opens the enprompt "run locally" guide - installation commands, model
+    /// pulls, disk space, and benchmarks for anyone without an API key.
+    func openLocalSetupPage() {
+        if let url = URL(string: "https://enprompt.pages.dev/run-locally/") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Opens the same local-setup guide from any model's ? button. The guide
+    /// is a single page (no per-model sections), so the model name is not
+    /// used in the URL - kept as a parameter in case the page gains anchors.
+    func openModelGuide(_ model: String) {
+        if let url = URL(string: "https://enprompt.pages.dev/run-locally/") {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -467,6 +557,26 @@ final class AppState: ObservableObject {
             testStatus = EnhanceStatus(isError: true, message: LLMError.unknownProvider.errorDescription ?? "Unknown provider")
             return
         }
+        // Local Ollama: no key exists - the test is "can we reach the server
+        // and does it have models?" (model names vary per machine, so probing
+        // a hardcoded model would fail for people who pulled different ones).
+        if provider == .ollama {
+            testStatus = EnhanceStatus(isError: false, message: "Testing Ollama (local)…")
+            do {
+                let models = try await LLMClient.fetchOllamaModels(baseURL: baseURL)
+                ollamaModels = models
+                let visionCount = models.filter(LLMClient.isVisionModel).count
+                testStatus = EnhanceStatus(
+                    isError: false,
+                    message: "Ollama connected - \(models.count) models installed (\(visionCount) vision-capable)"
+                )
+                DebugLogger.log("LLM TEST OK (ollama): \(models.joined(separator: ", "))")
+            } catch {
+                testStatus = EnhanceStatus(isError: true, message: "Couldn't reach Ollama at \(baseURL) - is the Ollama app running?")
+                DebugLogger.log("LLM TEST FAILED (ollama): \(error.localizedDescription)")
+            }
+            return
+        }
         testStatus = EnhanceStatus(isError: false, message: "Testing \(provider.displayName)…")
         let probe = LLMConfig(provider: provider, model: provider.defaultModel, apiKey: apiKey, baseURL: provider.defaultBaseURL)
         do {
@@ -487,6 +597,29 @@ final class AppState: ObservableObject {
             testStatus = EnhanceStatus(isError: true, message: LLMError.unknownProvider.errorDescription ?? "Unknown provider")
             return false
         }
+        // Local Ollama: no key to check - just confirm the server answers and
+        // remember the models it has.
+        if provider == .ollama {
+            // Coming from another provider: never validate against the old
+            // provider's server URL.
+            if self.provider != .ollama {
+                baseURL = LLMProvider.ollama.defaultBaseURL
+            }
+            do {
+                let models = try await LLMClient.fetchOllamaModels(baseURL: baseURL)
+                ollamaModels = models
+            } catch {
+                testStatus = EnhanceStatus(isError: true, message: "Couldn't reach Ollama at \(baseURL) - is the Ollama app running?")
+                DebugLogger.log("SAVE LLM REJECTED (ollama): \(error.localizedDescription)")
+                return false
+            }
+            self.provider = provider
+            persistConfig()
+            llmSetupExpanded = false
+            testStatus = nil
+            DebugLogger.log("LLM SAVED: \(provider.displayName) (\(model), vision: \(visionModel.isEmpty ? "default" : visionModel))")
+            return true
+        }
         let probe = LLMConfig(provider: provider, model: provider.defaultModel, apiKey: key, baseURL: provider.defaultBaseURL)
         do {
             try await LLMClient.validate(config: probe)
@@ -495,9 +628,16 @@ final class AppState: ObservableObject {
             DebugLogger.log("SAVE LLM REJECTED: \(error.localizedDescription)")
             return false
         }
+        // Re-applying defaults only when the provider changed: a re-save of
+        // the same provider must keep the model the user picked (e.g. a
+        // locally installed Ollama vision model).
+        let providerChanged = self.provider != provider
         self.provider = provider
-        model = provider.defaultModel
-        baseURL = provider.defaultBaseURL
+        if providerChanged {
+            model = provider.defaultModel
+            baseURL = provider.defaultBaseURL
+            if provider != .ollama { visionModel = "" }
+        }
         persistConfig()
         llmSetupExpanded = false
         testStatus = nil
@@ -736,6 +876,21 @@ final class AppState: ObservableObject {
         visualCaptureDone = false
         DebugLogger.log("VISUAL CAPTURE: showing canvas")
 
+        // Warm the local vision model while the user draws and speaks: Ollama
+        // loads models into memory on first use (can take seconds), and that
+        // load would otherwise happen after Esc, right before the prompt call.
+        if provider == .ollama {
+            let model = visionModel.isEmpty ? LLMClient.visionModel(for: .ollama) : visionModel
+            Task {
+                do {
+                    try await LLMClient.warmUp(baseURL: baseURL, model: model)
+                    DebugLogger.log("VISUAL CAPTURE: warmed \(model)")
+                } catch {
+                    DebugLogger.log("VISUAL CAPTURE: warm-up failed (ignored): \(error.localizedDescription)")
+                }
+            }
+        }
+
         canvas.onFinish = { [weak self] strokes, transcript in
             self?.canvasFinished(strokes: strokes, transcript: transcript)
         }
@@ -759,8 +914,11 @@ final class AppState: ObservableObject {
 
         Task {
             enhancePhase = .enhancing(0)
+            // 640px max keeps the screenshot readable while cutting image
+            // tokens roughly in half vs. 700px - faster to process, and the
+            // model answers sooner.
             guard
-                let jpeg = ScreenCapture.captureFullScreenJPEG(maxDimension: 700, quality: 0.5),
+                let jpeg = ScreenCapture.captureFullScreenJPEG(maxDimension: 640, quality: 0.45),
                 let image = CGImageSourceCreateWithData(jpeg as CFData, nil).flatMap({
                     CGImageSourceCreateImageAtIndex($0, 0, nil)
                 })
@@ -775,7 +933,7 @@ final class AppState: ObservableObject {
                 onto: image
             )
             let rep = NSBitmapImageRep(cgImage: annotated)
-            guard let annotatedJPEG = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.6]) else {
+            guard let annotatedJPEG = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.55]) else {
                 enhancePhase = .error("Screen capture failed")
                 return
             }
@@ -794,8 +952,13 @@ final class AppState: ObservableObject {
                 let targetPID = focus.flatMap { $0.appPID } ?? 0
                 KeyboardInputService.pasteText(prompt, in: targetPID == 0 ? nil : targetPID)
                 saveCapturedPrompt(prompt)
-                enhancePhase = .success("Visual prompt pasted + saved (\(prompt.count) chars)")
-                DebugLogger.log("VISUAL CAPTURE: pasted + saved \(prompt.count) chars")
+                // Always mirror the prompt into the clipboard, so it's there
+                // even if paste into the focused field didn't land - the
+                // toast tells the user it's ready to paste anywhere.
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(prompt, forType: .string)
+                enhancePhase = .success("Pasted, saved & copied to clipboard (\(prompt.count) chars)")
+                DebugLogger.log("VISUAL CAPTURE: pasted + saved + copied \(prompt.count) chars")
             } catch {
                 enhancePhase = .error((error as? LLMError)?.userFacingMessage ?? "The AI couldn't read your drawing. Please try again.")
                 DebugLogger.log("VISUAL CAPTURE FAILED: \(error.localizedDescription)")

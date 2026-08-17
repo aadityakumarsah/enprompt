@@ -11,6 +11,10 @@ struct SettingsView: View {
     /// snaps back to the matching preset (e.g. "default") immediately.
     @State private var isCustomMode = false
 
+    /// The provider chosen in the dropdown (may differ from state.provider
+    /// until Save). Starts from what's currently configured.
+    @State private var pickedProvider: LLMProvider = AppState.shared.provider
+
     /// Live feedback under the API key field as the user pastes a key.
     private var detectedLabel: (text: String, icon: String, color: Color) {
         let trimmed = state.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -45,6 +49,39 @@ struct SettingsView: View {
                 }
             }
         )
+    }
+
+    /// Persists the picked model immediately, so a chosen Ollama model
+    /// survives relaunches even without pressing Save in another section.
+    private var modelBinding: Binding<String> {
+        Binding(
+            get: { state.model },
+            set: { state.model = $0; state.persistConfig() }
+        )
+    }
+
+    private var visionModelBinding: Binding<String> {
+        Binding(
+            get: { state.visionModel },
+            set: { state.visionModel = $0; state.persistConfig() }
+        )
+    }
+
+    private var serverURLBinding: Binding<String> {
+        Binding(
+            get: { state.baseURL },
+            set: { state.baseURL = $0; state.persistConfig() }
+        )
+    }
+
+    /// Every installed model, plus whatever is currently selected (in case
+    /// Ollama is off right now and the list is empty).
+    private var ollamaEnhanceOptions: [String] {
+        Array(Set(state.ollamaModels + [state.model])).sorted()
+    }
+
+    private var ollamaVisionOptions: [String] {
+        Array(Set(state.ollamaModels + [state.visionModel])).sorted()
     }
 
     var body: some View {
@@ -142,6 +179,39 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
+                    Picker("Provider", selection: $pickedProvider) {
+                        ForEach(LLMProvider.allCases) { provider in
+                            Text(provider.displayName).tag(provider)
+                        }
+                    }
+                    .help("Ollama (local) needs no API key - pick it and hit Save. Cloud providers just need their API key pasted below")
+                    Button {
+                        state.openLocalSetupPage()
+                    } label: {
+                        Label("Run locally - free & private (guide)", systemImage: "macbook.and.iphone")
+                    }
+                    .help("Step-by-step guide: install Ollama, pull models, disk space & benchmarks - everything runs on your Mac, no money needed")
+                    LabeledContent("Model") {
+                        HStack(spacing: 6) {
+                            TextField(pickedProvider.defaultModel, text: modelBinding)
+                                .textFieldStyle(.roundedBorder)
+                            Button {
+                                state.openModelGuide(state.model)
+                            } label: {
+                                Image(systemName: "questionmark.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Open the free local setup guide - install commands, disk space, benchmarks")
+                        }
+                        .frame(width: 264)
+                    }
+                    .help("The model used for text enhancement. Pre-filled per provider - e.g. DeepSeek: deepseek-chat, Kimi: kimi-k2-0711-preview")
+                    LabeledContent("Server URL") {
+                        TextField(pickedProvider.defaultBaseURL, text: serverURLBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 240)
+                    }
+                    .help("Server the provider speaks on. Pre-filled defaults: Ollama → http://127.0.0.1:11434/v1 · DeepSeek → https://api.deepseek.com/v1 · Kimi → https://api.moonshot.ai/v1")
                     SecureField("API key", text: $state.apiKey)
                         .textFieldStyle(.roundedBorder)
                     if !state.apiKey.isEmpty {
@@ -173,12 +243,129 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundStyle(testStatus.isError ? .red : .green)
                     }
-                    Text("Paste your API key and hit Save - enprompt detects the provider automatically (Claude, ChatGPT/Codex, OpenRouter or Gemini), sets everything up, and tests the key against the real API before saving. Nothing else is needed. The key is stored in your Keychain.")
+                    Text("Pick a provider, paste your API key and hit Save - enprompt detects the provider from the key automatically (Claude, ChatGPT/Codex, OpenRouter or Gemini), or choose Ollama (local) for a 100% free, private, offline setup - no key needed. The key is stored in your Keychain.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             } header: {
                 Text("LLM")
+            }
+
+            if pickedProvider == .ollama {
+                Section {
+                    LabeledContent("Enhance model") {
+                        HStack(spacing: 6) {
+                            Picker("", selection: modelBinding) {
+                                ForEach(ollamaEnhanceOptions, id: \.self) { name in
+                                    Text(name).tag(name)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 220)
+                            Button {
+                                state.openModelGuide(state.model)
+                            } label: {
+                                Image(systemName: "questionmark.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Open the free local setup guide - install commands, disk space, benchmarks")
+                        }
+                    }
+                    .help("The model used when you double-tap ⌥ to enhance text")
+                    LabeledContent("Vision model") {
+                        HStack(spacing: 6) {
+                            Picker("", selection: visionModelBinding) {
+                                Text("Same as enhance model").tag("")
+                                ForEach(ollamaVisionOptions, id: \.self) { name in
+                                    HStack(spacing: 6) {
+                                        Text(name)
+                                        if LLMClient.isVisionModel(name) {
+                                            Image(systemName: "camera.fill")
+                                                .foregroundStyle(.orange)
+                                        }
+                                    }
+                                    .tag(name)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 220)
+                            Button {
+                                state.openModelGuide(state.visionModel.isEmpty ? state.model : state.visionModel)
+                            } label: {
+                                Image(systemName: "questionmark.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Open the free local setup guide - install commands, disk space, benchmarks")
+                        }
+                    }
+                    .help("The model that reads your screenshot in visual capture (⌥⌥⌥). Models that support vision are marked with a camera icon")
+                    HStack {
+                        Button("Refresh models") {
+                            Task { await state.loadOllamaModels() }
+                        }
+                        if let status = state.ollamaPullStatus {
+                            Text(status)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if state.ollamaModelError != nil, state.ollamaModels.isEmpty {
+                            Text("Ollama isn't installed or isn't running")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        } else if !state.ollamaModels.contains(where: LLMClient.isVisionModel) {
+                            Text("No vision-capable model yet - visual capture (⌥⌥⌥) needs one")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        } else {
+                            Text("\(state.ollamaModels.count) models on your Mac (local, free, offline-capable)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if let error = state.ollamaModelError, state.ollamaModels.isEmpty, state.ollamaPullStatus == nil {
+                        // Fresh user, nothing installed: hold their hand
+                        // through the free setup - no terminal needed.
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Free local setup (no account, no money):")
+                                .font(.caption)
+                                .fontWeight(.semibold)
+                            Text("1. Install Ollama (free app)  2. Start it  3. Pull a vision model  4. Save")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 8) {
+                                Button("Install Ollama (free)") {
+                                    state.openOllamaDownload()
+                                }
+                                Button("Start Ollama") {
+                                    state.startOllamaApp()
+                                }
+                                Button("Retry") {
+                                    Task { await state.loadOllamaModels() }
+                                }
+                            }
+                        }
+                    } else if state.ollamaPullStatus == nil,
+                              !state.ollamaModels.contains(where: LLMClient.isVisionModel) {
+                        // Server is up but no vision model: one-click pull.
+                        HStack(spacing: 8) {
+                            Button("Pull qwen2.5vl:7b (vision, ~6 GB)") {
+                                Task { await state.pullOllamaModel("qwen2.5vl:7b") }
+                            }
+                            Button("Pull llama3.2 (text, ~2 GB)") {
+                                Task { await state.pullOllamaModel("llama3.2") }
+                            }
+                        }
+                    }
+                    if let message = state.ollamaModelError, !state.ollamaModels.isEmpty, state.ollamaPullStatus == nil {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                    Text("Everything runs on your Mac - free forever, works offline, no data leaves your machine. Pull new models anytime with `ollama pull <name>` in the terminal, then hit Refresh.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("Ollama models")
+                }
             }
 
             Section {
@@ -227,7 +414,34 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 520, height: 600)
-        .onAppear { state.refreshPermissions() }
+        .onAppear {
+            pickedProvider = state.provider
+            state.refreshPermissions()
+            Task { await state.loadOllamaModels() }
+        }
+        .onChange(of: pickedProvider) { _, newValue in
+            // Picking a different provider applies its defaults (model, server
+            // URL, vision model). Ollama additionally fills the sentinel API
+            // key and loads the installed model list for the pickers.
+            if newValue == .ollama {
+                state.apiKey = "ollama"
+            }
+            if state.provider != newValue {
+                state.model = newValue.defaultModel
+                state.baseURL = newValue.defaultBaseURL
+                state.visionModel = ""
+                state.persistConfig()
+            }
+            if newValue == .ollama {
+                Task { await state.loadOllamaModels() }
+            }
+        }
+        .onChange(of: state.provider) { _, newValue in
+            pickedProvider = newValue
+            if newValue == .ollama {
+                Task { await state.loadOllamaModels() }
+            }
+        }
         .onChange(of: state.systemPrompt) { _, newValue in
             // Editing the box to text that matches no preset means the user is
             // writing their own prompt: switch the dropdown to "Custom".

@@ -90,6 +90,36 @@ curl -L -o ~/Downloads/enprompt.dmg https://github.com/aadityakumarsah/enprompt/
 
 ---
 
+## 💸 100% free local setup (no API key, no money)
+
+enprompt works fully offline and free forever with **Llama models** (run locally through the free
+**Ollama** engine). Nothing is sent anywhere. A brand-new Mac needs exactly four steps — enprompt
+guides you through them in **Settings → LLM** (the "Run locally — free & private" button and the
+**?** buttons open the full guide — install commands, Llama text + vision downloads, disk space and
+benchmarks — at [enprompt.pages.dev/run-locally/](https://enprompt.pages.dev/run-locally/)):
+
+1. **Install Ollama** (free, ~1 min)
+   - Visit [ollama.com/download](https://ollama.com/download) and install the app, **or** run
+     `curl -fsSL https://ollama.com/install.sh | sh` in the Terminal
+   - Start the **Ollama** menu-bar app (the little llama icon must be there)
+2. **Pull the models** — one line in the Terminal, or click the buttons inside enprompt's Settings
+   (Ollama models section) — no terminal needed:
+   ```bash
+   ollama pull qwen2.5vl:7b    # vision — reads your screenshots in ⌥⌥⌥ capture (~6 GB)
+   ollama pull llama3.2        # text — enhance/dictate polishing (~2 GB)
+   ```
+   Any Ollama model works (`llava`, `gemma3`, `qwen3`…). Small models = faster on weaker Macs.
+3. **Open enprompt → Settings… → LLM → Change** → pick **Ollama (local)** — the server
+   (`http://127.0.0.1:11434/v1`) and API key (`ollama`, a sentinel — there is no real key) fill
+   themselves. Hit **Save**.
+4. **Pick your models** in the "Ollama models" section — enprompt lists everything you pulled and
+   auto-selects the first vision-capable model for ⌥⌥⌥ capture. Done — double-tap <kbd>⌥</kbd> to enhance.
+
+> 💡 Not enough RAM/disk? Vision is only needed for screen capture — for pure text enhancement a
+> ~2 GB model (like `llama3.2`) is plenty and runs on almost any Mac.
+
+---
+
 ## 🏗 Architecture
 
 | File | Role |
@@ -107,7 +137,7 @@ curl -L -o ~/Downloads/enprompt.dmg https://github.com/aadityakumarsah/enprompt/
 
 ```
 ├── enprompt-app/     # Swift package — the macOS app (menu bar, event tap, UI)
-└── enprompt-site/    # Landing page source (deployed to enprompt.pages.dev)
+└── enprompt-site/    # React + Vite landing page (deployed to enprompt.pages.dev)
 ```
 
 ### Build & run
@@ -117,6 +147,19 @@ cd enprompt-app
 ./build_app.sh        # builds release and signs with your Apple Development identity
 open build/enprompt.app
 ```
+
+### Landing site
+
+React (Vite + react-router-dom). Routes: `/` (landing) and `/run-locally` (Ollama guide). Deploys to Cloudflare Pages from GitHub.
+
+```bash
+cd enprompt-site
+npm install
+npm run dev           # local dev server with SPA fallback
+npm run build         # outputs static site to dist/
+```
+
+Cloudflare Pages settings: build command `npm run build`, output directory `dist`. `public/_redirects` makes every path serve the app, so deep links like `enprompt.pages.dev/run-locally` work.
 
 ---
 

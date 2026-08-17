@@ -111,13 +111,14 @@ enum SelfTest {
 
         // 4. Vision model produces a prompt from a real image, using the
         //    provider detected from the stored key (ollama uses the local
-        //    vision model).
+        //    vision model picked in Settings, falling back to the default).
         if let realKey = KeychainStore.load(),
            let detected = LLMProvider.providerForAPIKey(realKey),
            !realKey.isEmpty {
+            let visionOverride = UserDefaults.standard.string(forKey: "visionModel") ?? ""
             let config = LLMConfig(
                 provider: detected,
-                model: LLMClient.visionModel(for: detected),
+                model: visionOverride.isEmpty ? LLMClient.visionModel(for: detected) : visionOverride,
                 apiKey: realKey,
                 baseURL: detected.defaultBaseURL
             )
@@ -135,6 +136,17 @@ enum SelfTest {
             }
         } else {
             check("vision prompt", false, "no usable key in Keychain")
+        }
+
+        // 5. Ollama: the local model listing the Settings picker relies on,
+        //    plus the vision-capability detection used for the camera icons.
+        do {
+            let models = try await LLMClient.fetchOllamaModels(baseURL: LLMProvider.ollama.defaultBaseURL)
+            check("ollama model list", !models.isEmpty, "\(models.count) models: \(models.joined(separator: ", "))")
+            let vision = models.filter(LLMClient.isVisionModel)
+            check("ollama vision detection", !vision.isEmpty, "vision-capable: \(vision.joined(separator: ", "))")
+        } catch {
+            skip("ollama model list", "local Ollama server not running: \(error.localizedDescription)")
         }
 
         print("SELFTEST \(failures == 0 ? "ALL PASS" : "\(failures) FAILURES")")
