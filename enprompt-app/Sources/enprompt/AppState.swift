@@ -603,17 +603,27 @@ final class AppState: ObservableObject {
             try? await Task.sleep(nanoseconds: 300_000_000)
         }
         guard let input else {
-            // Fallback: the user selected text OUTSIDE any editable field
-            // (a tweet, a post, an article). Only a LIVE selection counts -
-            // never an old cached one, so Enhance never works on text the
-            // user can't see. The result lands on the clipboard.
+            // 1. A live selection anywhere (read-only text: tweets, posts).
             if let selection = AXService.focusedSelection(), !selection.isEmpty {
                 await enhanceToClipboard(selection)
                 return
             }
+            // 2. Web-content apps (Cursor, VS Code and other Electron apps)
+            //    hide their focused input from the AX focus attributes. When
+            //    the user is inside web content, select all + copy via the
+            //    keyboard and enhance that - the result is pasted back.
+            if AXService.webContentElement() != nil {
+                let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+                let copied = KeyboardInputService.copyCurrentText(in: pid)
+                if !copied.isEmpty {
+                    await enhanceAndPasteInPlace(copied, appPID: pid)
+                    return
+                }
+                DebugLogger.log("ENHANCE keyboard fallback: copied text was empty")
+            }
             enhancePhase = .error(EnhanceError(
                 title: "No text found",
-                guidance: "Select the text you want to work with first, then try again.",
+                guidance: "Click into the text field you want to enhance (or select the text first), then try again.",
                 fix: nil
             ))
             DebugLogger.log("ENHANCE SKIPPED: no focused editable input after retries — \(AXService.focusedElementDebugInfo())")
@@ -855,6 +865,51 @@ final class AppState: ObservableObject {
             enhancePhase = .success("\(trimmed.count) → \(enhanced.count) chars — copied to clipboard (\(elapsed)s), press ⌘V to paste")
             NSSound(named: "Glass")?.play()
             DebugLogger.log("ENHANCED \(trimmed.count) -> \(enhanced.count) chars to clipboard in \(elapsed)s")
+        } catch {
+            enhancePhase = .error(Self.enhanceError(from: error))
+            NSSound(named: "Sosumi")?.play()
+            DebugLogger.log("ENHANCE FAILED: \(error.localizedDescription)")
+        }
+    }
+
+    /// Keyboard-fallback path for Electron apps (Cursor, VS Code): enhances
+    /// text that was read via Command-A + Command-C and pastes the result
+    /// back in place with Command-A + Command-V.
+    private func enhanceAndPasteInPlace(_ text: String, appPID: pid_t?) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            enhancePhase = .error(EnhanceError(
+                title: "No input text found",
+                guidance: "Type something into the field first, then try again.",
+                fix: nil
+            ))
+            return
+        }
+        isEnhancing = true
+        enhancePhase = .enhancing(0)
+        NSSound(named: "Tink")?.play()
+        defer { isEnhancing = false }
+
+        let startedAt = Date()
+        do {
+            DebugLogger.log("ENHANCING \(trimmed.count) chars (keyboard fallback) via \(config.provider.rawValue)/\(config.model)")
+            let enhanced = try await LLMClient.enhance(
+                trimmed,
+                config: config,
+                systemPrompt: systemPrompt
+            ) { [weak self] progress in
+                Task { @MainActor in
+                    self?.enhancePhase = .enhancing(progress)
+                }
+            }
+            guard !enhanced.isEmpty else { throw LLMError.emptyResponse }
+            recordUsage(promptText: systemPrompt + "\n" + trimmed, completionText: enhanced)
+            let elapsed = String(format: "%.1f", Date().timeIntervalSince(startedAt))
+
+            KeyboardInputService.pasteReplacingCurrentText(enhanced, in: appPID)
+            enhancePhase = .success("Expanded \(trimmed.count) → \(enhanced.count) chars (\(elapsed)s)")
+            NSSound(named: "Glass")?.play()
+            DebugLogger.log("ENHANCED \(trimmed.count) -> \(enhanced.count) chars in \(elapsed)s (keyboard fallback, pasted in place)")
         } catch {
             enhancePhase = .error(Self.enhanceError(from: error))
             NSSound(named: "Sosumi")?.play()

@@ -66,6 +66,21 @@ enum KeyboardInputService {
         restoreClipboard(pasteboard, saved: saved)
     }
 
+    /// Selects all text in the focused field (Command-A) and copies it
+    /// (Command-C), returning what was copied. Used as a read fallback for
+    /// apps whose AX tree hides the focused input (Electron apps like Cursor
+    /// and VS Code). The clipboard is left holding the copied text.
+    static func copyCurrentText(in appPID: pid_t? = nil) -> String {
+        activate(appPID)
+
+        postKey(keyCode: 0, flags: .maskCommand) // Command-A: select all
+        usleep(150_000)
+        postKey(keyCode: 8, flags: .maskCommand) // Command-C: copy
+        usleep(150_000)
+
+        return NSPasteboard.general.string(forType: .string) ?? ""
+    }
+
     private static func activate(_ appPID: pid_t?) {
         if let pid = appPID {
             NSRunningApplication(processIdentifier: pid)?.activate(options: [.activateAllWindows])

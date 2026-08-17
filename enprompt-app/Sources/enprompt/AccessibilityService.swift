@@ -283,11 +283,13 @@ enum AXService {
 
     /// Searches inside web content / container views for a focused editable
     /// element (Safari and Chrome often report the web area as focused).
+    /// Electron apps (Cursor, VS Code) mark nothing as focused, so a second
+    /// pass accepts any editable element that actually holds text.
     private static func findFocusedEditableDescendant(
         in root: AXUIElement,
         depth: Int
     ) -> (element: AXUIElement, role: String)? {
-        guard depth < 8 else { return nil }
+        guard depth < 14 else { return nil }
         if isFocused(root), let hit = editableCheck(root) { return hit }
         guard let children = attribute(root, kAXChildrenAttribute) as? [AXUIElement] else {
             return nil
@@ -300,6 +302,31 @@ enum AXService {
         return nil
     }
 
+    /// Second pass for Electron apps: no element is marked focused, but the
+    /// input the user typed into still holds text. Returns the deepest
+    /// editable element with a non-empty value.
+    private static func findEditableDescendantWithText(
+        in root: AXUIElement,
+        depth: Int
+    ) -> (element: AXUIElement, role: String)? {
+        guard depth < 14 else { return nil }
+        var best: (element: AXUIElement, role: String)?
+        if let hit = editableCheck(root),
+           let value = attribute(hit.element, kAXValueAttribute) as? String,
+           !value.isEmpty {
+            best = hit
+        }
+        guard let children = attribute(root, kAXChildrenAttribute) as? [AXUIElement] else {
+            return best
+        }
+        for child in children {
+            if let deeper = findEditableDescendantWithText(in: child, depth: depth + 1) {
+                best = deeper
+            }
+        }
+        return best
+    }
+
     /// Walks up the accessibility tree looking for an editable text input.
     private static func findEditableElement(from start: AXUIElement) -> (element: AXUIElement, role: String)? {
         var current: AXUIElement? = start
@@ -309,11 +336,42 @@ enum AXService {
             if let role = attribute(el, kAXRoleAttribute) as? String,
                role.contains("WebArea") || role == kAXGroupRole as String || role == kAXScrollAreaRole as String {
                 if let hit = findFocusedEditableDescendant(in: el, depth: 0) { return hit }
+                // Electron apps mark nothing as focused: fall back to the
+                // deepest editable that holds text.
+                if let hit = findEditableDescendantWithText(in: el, depth: 0) { return hit }
             }
             current = attributeElement(el, kAXParentAttribute)
             depth += 1
         }
         return nil
+    }
+
+    /// True when the element lives inside web content (has a WebArea
+    /// ancestor). Web content is where Electron apps (Cursor, VS Code) and
+    /// browsers hide their focused input from the AX focus attributes.
+    static func isInsideWebContent(_ element: AXUIElement) -> Bool {
+        var current: AXUIElement? = element
+        var depth = 0
+        while let el = current, depth < 20 {
+            if let role = attribute(el, kAXRoleAttribute) as? String,
+               role.contains("WebArea") {
+                return true
+            }
+            current = attributeElement(el, kAXParentAttribute)
+            depth += 1
+        }
+        return false
+    }
+
+    /// The focused/hit element when it sits inside web content and belongs
+    /// to another app (never enprompt itself). Signals that the user is in
+    /// an app whose AX tree may hide the actual input (Cursor, VS Code).
+    static func webContentElement() -> AXUIElement? {
+        guard let element = deepFocusedElement() else { return nil }
+        var pid: pid_t = 0
+        AXUIElementGetPid(element, &pid)
+        guard pid != getpid() else { return nil }
+        return isInsideWebContent(element) ? element : nil
     }
 
     /// One-line diagnostic for when no editable input is found, e.g.
