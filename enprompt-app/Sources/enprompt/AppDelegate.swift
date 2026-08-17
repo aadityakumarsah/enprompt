@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var monitor: KeyboardMonitor?
     private var trustTimer: Timer?
+    private var updateTimer: Timer?
     private var statusItemController: StatusItemController?
     private var overlayController: EnhanceOverlayController?
     private var instanceLockFD: Int32 = -1
@@ -55,6 +56,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppState.shared.requestPrivacyPermissions()
         startMonitor()
 
+        // Silently look for a newer release on GitHub; a banner appears in the
+        // popover if one exists. Throttled to once per 12 hours, and re-checked
+        // every 6 hours while the app runs so updates surface without a restart.
+        Task { await AppState.shared.checkForUpdates() }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { _ in
+            Task { await AppState.shared.checkForUpdates() }
+        }
+
         // The event tap can only be created once Accessibility permission is
         // granted, which may happen after launch. Retry until it succeeds.
         trustTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -80,6 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         monitor?.stop()
         trustTimer?.invalidate()
+        updateTimer?.invalidate()
     }
 
     private func startMonitor() {

@@ -84,6 +84,12 @@ final class AppState: ObservableObject {
     /// Non-nil while a model download is in progress (shown in Settings).
     @Published var ollamaPullStatus: String?
 
+    /// A newer enprompt release exists on GitHub - shown as a banner in the
+    /// popover with a one-click download (DMG + Finder, no notarization).
+    @Published var updateInfo: UpdateInfo?
+    @Published var isCheckingForUpdate = false
+    @Published var isDownloadingUpdate = false
+
     private let defaults = UserDefaults.standard
 
     /// The pre-rename default system prompt ("You are Treki…"): stored configs
@@ -232,6 +238,61 @@ final class AppState: ObservableObject {
         if let url = URL(string: "https://enprompt.pages.dev/run-locally/") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    // MARK: - Updates
+
+    /// Checks GitHub for a newer release. `force` bypasses the 12-hour
+    /// auto-check throttle (menu button); otherwise called once per launch.
+    func checkForUpdates(force: Bool = false) async {
+        guard !isCheckingForUpdate, updateInfo == nil else { return }
+        if !force, Date().timeIntervalSince(lastUpdateCheck) < 12 * 3600 { return }
+        isCheckingForUpdate = true
+        defer { isCheckingForUpdate = false }
+        do {
+            if let info = try await UpdateChecker.check() {
+                updateInfo = info
+            }
+            lastUpdateCheck = Date()
+        } catch {
+            DebugLogger.log("UPDATE: check failed - \(error.localizedDescription)")
+        }
+    }
+
+    /// Fully automatic update: swaps the new app in place and relaunches. If
+    /// the bundle can't be replaced (read-only location), falls back to
+    /// downloading the DMG and opening it in Finder. The banner stays until
+    /// the user dismisses it or the update succeeds.
+    func downloadAndInstallUpdate() {
+        guard let info = updateInfo, !isDownloadingUpdate else { return }
+        isDownloadingUpdate = true
+        Task {
+            do {
+                try await UpdateChecker.replaceRunningApp(with: info)
+                updateInfo = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    NSApp.terminate(nil)
+                }
+            } catch {
+                DebugLogger.log("UPDATE: in-place install failed - \(error.localizedDescription); falling back to DMG")
+                do {
+                    try await UpdateChecker.downloadAndOpen(info)
+                    updateInfo = nil
+                } catch {
+                    DebugLogger.log("UPDATE: download failed - \(error.localizedDescription)")
+                }
+            }
+            isDownloadingUpdate = false
+        }
+    }
+
+    func dismissUpdate() {
+        updateInfo = nil
+    }
+
+    private var lastUpdateCheck: Date {
+        get { defaults.object(forKey: "lastUpdateCheck") as? Date ?? .distantPast }
+        set { defaults.set(newValue, forKey: "lastUpdateCheck") }
     }
 
     func applyProviderDefaults() {
