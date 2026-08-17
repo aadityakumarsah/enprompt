@@ -878,3 +878,155 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+/* ============ Learn hub ============ */
+.learn-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 18px;
+}
+.learn-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 22px;
+  border-radius: 16px;
+  border: 1px solid rgba(38, 27, 14, 0.12);
+  background: #fff;
+  text-decoration: none;
+  color: inherit;
+  box-shadow: 0 4px 16px rgba(38, 27, 14, 0.05);
+  transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+}
+.learn-card:hover {
+  transform: translateY(-4px);
+  border-color: rgba(249, 115, 22, 0.4);
+  box-shadow: 0 14px 34px rgba(38, 27, 14, 0.12);
+}
+.learn-icon {
+  font-size: 30px;
+  line-height: 1;
+}
+.learn-tag {
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #b45309;
+  background: rgba(249, 115, 22, 0.1);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.learn-card h3 { font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+.learn-card p { font-size: 14px; color: var(--muted); line-height: 1.6; margin: 0; }
+.learn-cta { margin-top: auto; font-size: 14px; font-weight: 700; color: var(--accent); }
+
+/* ============ System prompt guide ============ */
+.sp-steps { display: flex; flex-direction: column; gap: 14px; margin-top: 18px; }
+.sp-step {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  padding: 16px 18px;
+  border-radius: 14px;
+  border: 1px solid rgba(38, 27, 14, 0.1);
+  background: #fff;
+}
+.sp-step-n {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 14px;
+  color: #fff;
+  background: linear-gradient(135deg, #f97316, #dc2626);
+  box-shadow: 0 4px 10px rgba(249, 115, 22, 0.35);
+}
+.sp-step h3 { font-size: 16px; font-weight: 700; margin: 0 0 4px; }
+.sp-step p { font-size: 14px; color: var(--muted); line-height: 1.6; margin: 0; }
+
+.sp-demo {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px;
+  border-radius: 16px;
+  background: linear-gradient(160deg, #fffdf9, #fff);
+  border: 1px solid rgba(38, 27, 14, 0.12);
+  box-shadow: 0 10px 30px rgba(38, 27, 14, 0.08);
+  margin-top: 18px;
+}
+.sp-demo-post, .sp-demo-reply { display: flex; gap: 12px; }
+.sp-demo-avatar {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: rgba(249, 115, 22, 0.12);
+  font-size: 17px;
+}
+.sp-demo-avatar.you { background: rgba(124, 58, 237, 0.12); }
+.sp-demo b { font-size: 14px; }
+.sp-demo-handle { font-size: 12px; color: var(--muted); margin-left: 6px; }
+.sp-demo p {
+  margin: 6px 0 0;
+  font-size: 15px;
+  line-height: 1.65;
+  color: #333;
+}
+.sp-demo-reply {
+  padding: 14px 16px;
+  border-radius: 14px;
+  background: rgba(124, 58, 237, 0.06);
+  border: 1px solid rgba(124, 58, 237, 0.16);
+}
+.caret {
+  display: inline-block;
+  width: 8px;
+  height: 17px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--accent);
+  animation: caret-blink 1s steps(1) infinite;
+}
+
+.sp-preset {
+  border: 1px solid rgba(38, 27, 14, 0.12);
+  border-radius: 16px;
+  background: #fff;
+  padding: 22px;
+  margin-bottom: 16px;
+  box-shadow: 0 6px 20px rgba(38, 27, 14, 0.06);
+}
+.sp-preset-head { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 14px; }
+.sp-preset-head h3 { font-size: 18px; font-weight: 800; margin: 0 0 4px; letter-spacing: -0.01em; }
+.sp-preset-head p { font-size: 14px; color: var(--muted); margin: 0; }
+.sp-preset-cols {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr;
+  gap: 20px;
+  border-top: 1px dashed rgba(38, 27, 14, 0.14);
+  padding-top: 14px;
+}
+.sp-preset-cols p { font-size: 14px; line-height: 1.6; color: #444; margin: 4px 0 12px; }
+.sp-label { display: block; font-size: 11px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 4px; }
+.sp-label.good { color: #16a34a; }
+.sp-label.bad { color: #dc2626; }
+.sp-mini-post, .sp-mini-reply {
+  font-size: 13px;
+  line-height: 1.6;
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.sp-mini-post { background: rgba(38, 27, 14, 0.05); color: #444; }
+.sp-mini-reply { background: rgba(124, 58, 237, 0.07); color: #333; border: 1px solid rgba(124, 58, 237, 0.15); }
+
+@media (max-width: 720px) {
+  .sp-preset-cols { grid-template-columns: 1fr; }
+}

@@ -21,6 +21,7 @@ export default function Nav({ ctaLabel = 'Get enprompt' }) {
   }, [])
 
   const localActive = pathname.startsWith('/run-locally')
+  const learnActive = pathname.startsWith('/learn')
 
   return (
     <nav className="nav">
@@ -36,6 +37,9 @@ export default function Nav({ ctaLabel = 'Get enprompt' }) {
           <a href="/#setup">FAQ</a>
           <Link to="/run-locally" style={localActive ? { color: 'var(--accent-deep)', fontWeight: 600 } : undefined}>
             Run locally
+          </Link>
+          <Link to="/learn" style={learnActive ? { color: 'var(--accent-deep)', fontWeight: 600 } : undefined}>
+            Learn
           </Link>
           <a href="https://github.com/aadityakumarsah/enprompt" target="_blank" rel="noopener">GitHub</a>
         </div>
