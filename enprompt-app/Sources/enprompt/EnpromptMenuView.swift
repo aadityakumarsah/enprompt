@@ -258,7 +258,9 @@ struct EnpromptMenuView: View {
         .frame(width: 340)
         .onAppear {
             state.refreshTrust()
-            Task { await state.checkForUpdates() }
+            // Force a fresh check on popover open: without `force` the hourly
+            // throttle can hide a just-published release for up to an hour.
+            Task { await state.checkForUpdates(force: true) }
             if state.provider == .ollama {
                 Task { await state.loadOllamaModels() }
             }
