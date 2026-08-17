@@ -123,6 +123,10 @@ final class AppState: ObservableObject {
     private var lastSelectionDate = Date.distantPast
     private var selectionWatcher: Timer?
 
+    /// Every user runs the exact same default system prompt. When a build
+    /// ships a new default (bump this version), stored configs are reset to
+    /// it on launch - no stale or divergent prompts linger from old builds.
+    static let defaultSystemPromptVersion = "1.9.15"
     /// The pre-rename default system prompt ("You are Treki…"): stored configs
     /// that still hold it are migrated to the new default on launch.
     static let legacyDefaultSystemPrompt = LLMClient.defaultSystemPrompt
@@ -161,7 +165,14 @@ final class AppState: ObservableObject {
             KeychainStore.deleteLegacy()
             DebugLogger.log("KEYCHAIN: migrated API key from legacy service")
         }
-        if let prompt = defaults.string(forKey: "systemPrompt"), !prompt.isEmpty {
+        // One default system prompt for everyone: whenever this build ships a
+        // newer default than the user has seen, replace whatever they stored.
+        if defaults.string(forKey: "defaultSystemPromptVersion") != Self.defaultSystemPromptVersion {
+            systemPrompt = LLMClient.defaultSystemPrompt
+            defaults.set(Self.defaultSystemPromptVersion, forKey: "defaultSystemPromptVersion")
+            defaults.set(systemPrompt, forKey: "systemPrompt")
+            DebugLogger.log("SYSTEM PROMPT: reset to the shared default (v\(Self.defaultSystemPromptVersion))")
+        } else if let prompt = defaults.string(forKey: "systemPrompt"), !prompt.isEmpty {
             systemPrompt = prompt
         }
         // Renamed the assistant: swap the old default system prompt for the new.
@@ -221,6 +232,7 @@ final class AppState: ObservableObject {
         defaults.set(baseURL, forKey: "baseURL")
         defaults.set(visionModel, forKey: "visionModel")
         defaults.set(systemPrompt, forKey: "systemPrompt")
+        defaults.set(Self.defaultSystemPromptVersion, forKey: "defaultSystemPromptVersion")
         if !apiKey.isEmpty {
             KeychainStore.save(apiKey)
         }

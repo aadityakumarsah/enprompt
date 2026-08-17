@@ -214,6 +214,53 @@ export default function SystemPromptGuide() {
 
         <div className="opt">
           <div className="opt-head">
+            <span className="opt-badge badge-free">Out of the box</span>
+            <h2>The default — one prompt, every user</h2>
+          </div>
+          <p className="opt-sub">
+            Every enprompt install ships the <b>exact same default system prompt</b>: enprompt is defined as
+            an AI prompt-engineering engine — it never answers, solves, or rewrites your request, it turns
+            your rough developer request into a clear, precise, implementation-ready prompt for another AI
+            coding agent. The contract is strict and identical for everyone: preserve intent, never invent
+            requirements, structure instead of padding, and output only the enhanced prompt.
+          </p>
+          <div className="sp-steps">
+            <div className="sp-step reveal">
+              <span className="sp-step-n">1</span>
+              <div>
+                <h3>Same default for all</h3>
+                <p>
+                  Updates reset the stored prompt to the shared default — no user runs a stale or
+                  divergent prompt. It's the "Polished rewrite (default)" preset in Settings.
+                </p>
+              </div>
+            </div>
+            <div className="sp-step reveal">
+              <span className="sp-step-n">2</span>
+              <div>
+                <h3>21 built-in rules</h3>
+                <p>
+                  Preserve the user's intent, think like a senior engineer, add structure not random
+                  length, handle vague requests, protect existing functionality, cover edge cases and
+                  acceptance criteria — and never solve the task yourself.
+                </p>
+              </div>
+            </div>
+            <div className="sp-step reveal">
+              <span className="sp-step-n">3</span>
+              <div>
+                <h3>Output-only</h3>
+                <p>
+                  The model returns just the enhanced coding prompt — no commentary, no explanations, no
+                  code fences, no "here is your prompt". Instantly copy-pasteable into any AI coding agent.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="opt">
+          <div className="opt-head">
             <span className="opt-badge badge-free">Go further</span>
             <h2>Write your own</h2>
           </div>
