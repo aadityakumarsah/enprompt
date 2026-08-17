@@ -64,36 +64,44 @@ struct EnpromptMenuView: View {
             }
             .frame(maxWidth: .infinity)
 
-            HStack(spacing: 8) {
-                Menu {
-                    Button("X.com (Twitter) reply") {
-                        Task { await state.prepareReply(preset: "X.com (Twitter) reply") }
+            if state.isReplyPromptActive {
+                HStack(spacing: 8) {
+                    Menu {
+                        ForEach(AppState.replyPresetNames, id: \.self) { name in
+                            Button(name) {
+                                Task { await state.prepareReply(preset: name) }
+                            }
+                        }
+                        Divider()
+                        Button("Custom prompt (saved)") {
+                            Task { await state.prepareReply(preset: nil) }
+                        }
+                    } label: {
+                        Label("Prepare reply", systemImage: "paperplane.fill")
                     }
-                    Button("Email reply") {
-                        Task { await state.prepareReply(preset: "Email reply") }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(state.isEnhancing)
+                    .help("Select any post text, pick a reply style, and the reply lands on your clipboard - ⌘V to paste")
+
+                    if let active = state.activePresetName {
+                        Text(active)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
-                    Button("Founder reply") {
-                        Task { await state.prepareReply(preset: "Founder reply") }
-                    }
-                    Divider()
-                    Button("Custom prompt (saved)") {
-                        Task { await state.prepareReply(preset: nil) }
-                    }
+                }
+            } else {
+                Button {
+                    Task { await state.enhanceFocusedText() }
                 } label: {
-                    Label("Prepare reply", systemImage: "paperplane.fill")
+                    Label("Enhance", systemImage: "wand.and.stars")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .disabled(state.isEnhancing)
-                .help("Select any post text, pick a reply style, and the reply lands on your clipboard - ⌘V to paste")
-
-                if let active = state.activePresetName {
-                    Text(active)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
+                .help("Runs the same enhancement as a ⌥⌥ double-tap")
             }
 
             if state.isEnhancing {
@@ -108,14 +116,11 @@ struct EnpromptMenuView: View {
                     .font(.caption)
                     .foregroundStyle(.green)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if case .error(let message) = state.enhancePhase {
-                Label(message, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+            } else if case .error(let error) = state.enhancePhase {
+                EnhanceErrorCard(error: error, openSettings: { openSettings() })
             }
 
-            Text("Prepare reply: select a post, pick a style, paste with ⌘V. Double-tap ⌥ enhances the focused field, hold ⌥ and speak for dictation, triple-tap ⌥ for the canvas: draw over the screen (pen, shapes, laser) while the mic listens live - press Esc to combine your drawing, the screenshot and your words into one prompt, pasted and saved under Captured prompts.")
+            Text("Double-tap ⌥ enhances the focused text, hold ⌥ and speak for dictation, triple-tap ⌥ for the canvas: draw over the screen (pen, shapes, laser) while the mic listens live - press Esc to combine your drawing, the screenshot and your words into one prompt, pasted and saved under Captured prompts.\(state.isReplyPromptActive ? " With a reply prompt active: select a post, pick a style, paste with ⌘V." : "")")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -266,9 +271,43 @@ struct EnpromptMenuView: View {
     }
 }
 
+/// Friendly error card: a short title, what to do about it, and a one-click
+/// shortcut to the right Settings section when one exists.
+private struct EnhanceErrorCard: View {
+
+    let error: EnhanceError
+    let openSettings: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Label(error.title, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(.orange)
+            Text(error.guidance)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if error.fix != nil {
+                Button("Open Settings", action: openSettings)
+                    .controlSize(.mini)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.orange.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(Color.orange.opacity(0.25))
+                )
+        )
+    }
+}
+
 /// Small keycap pill used to show keyboard shortcuts (e.g. the Option key).
 struct Keycap: View {
-
     let glyph: String
     let key: String
 

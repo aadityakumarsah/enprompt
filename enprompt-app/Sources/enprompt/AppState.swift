@@ -9,12 +9,27 @@ struct EnhanceStatus: Equatable {
     let message: String
 }
 
+/// A friendly, actionable error: a short title, plain-language guidance on
+/// what to do next, and an optional one-click fix that opens the right place.
+struct EnhanceError: Equatable {
+    enum Fix: Equatable {
+        case accessibility
+        case llm
+        case systemPrompt
+        case privacyPane
+    }
+
+    let title: String
+    let guidance: String
+    let fix: Fix?
+}
+
 enum EnhancePhase: Equatable {
     case idle
     case enhancing(Int)
     case listening(String)
     case success(String)
-    case error(String)
+    case error(EnhanceError)
 }
 
 @MainActor
@@ -216,6 +231,95 @@ final class AppState: ObservableObject {
             return name
         }
         return nil
+    }
+
+    /// The reply presets offered by the Prepare-reply menu.
+    static let replyPresetNames: [String] = LLMClient.promptPresets.keys
+        .filter { $0.lowercased().contains("reply") }
+        .sorted()
+
+    /// True when a reply preset (X.com, Email, Founder) is the active prompt:
+    /// only then does the popover show the Prepare-reply menu instead of the
+    /// plain Enhance button.
+    var isReplyPromptActive: Bool {
+        guard let name = activePresetName else { return false }
+        return Self.replyPresetNames.contains(name)
+    }
+
+    /// Turns any thrown error into a friendly, actionable EnhanceError.
+    static func enhanceError(from error: Error) -> EnhanceError {
+        guard let llm = error as? LLMError else {
+            return EnhanceError(
+                title: "Something went wrong",
+                guidance: "Please try again. If it keeps happening, check the log at ~/Library/Logs/enprompt.log.",
+                fix: nil
+            )
+        }
+        switch llm {
+        case .notConfigured:
+            return EnhanceError(
+                title: "No AI provider is set up yet",
+                guidance: "Open Settings and paste your API key - or pick Ollama for a free local setup.",
+                fix: .llm
+            )
+        case .unknownProvider:
+            return EnhanceError(
+                title: "We couldn't recognise that API key",
+                guidance: "Keys start with sk-ant- (Claude), sk- (ChatGPT/Codex), sk-or-v1- (OpenRouter), AIza (Gemini) or ollama (local).",
+                fix: .llm
+            )
+        case .http(let code, _):
+            switch code {
+            case 401, 403:
+                return EnhanceError(
+                    title: "Your API key was rejected",
+                    guidance: "Open Settings and paste a valid key.",
+                    fix: .llm
+                )
+            case 402, 429:
+                return EnhanceError(
+                    title: "Rate limit or credits reached",
+                    guidance: "Wait a few minutes or check your plan, then try again.",
+                    fix: nil
+                )
+            case 400:
+                return EnhanceError(
+                    title: "The AI provider rejected that request",
+                    guidance: "This usually passes on a retry - please try again.",
+                    fix: nil
+                )
+            case 404:
+                return EnhanceError(
+                    title: "That AI model wasn't found",
+                    guidance: "Check the model name in Settings.",
+                    fix: .llm
+                )
+            case 500...599:
+                return EnhanceError(
+                    title: "The AI provider is having issues right now",
+                    guidance: "Please try again in a moment.",
+                    fix: nil
+                )
+            default:
+                return EnhanceError(
+                    title: "Something went wrong talking to the AI",
+                    guidance: "Please try again.",
+                    fix: nil
+                )
+            }
+        case .decoding:
+            return EnhanceError(
+                title: "The AI's response couldn't be read",
+                guidance: "Please try again.",
+                fix: nil
+            )
+        case .emptyResponse:
+            return EnhanceError(
+                title: "The AI returned an empty response",
+                guidance: "Please try again - if it keeps happening, shorten the text.",
+                fix: nil
+            )
+        }
     }
 
     /// Saves the system prompt and briefly confirms it, e.g.
@@ -480,7 +584,11 @@ final class AppState: ObservableObject {
             return
         }
         guard AXService.isTrusted else {
-            enhancePhase = .error("Accessibility permission missing - grant it in enprompt Settings → Setup")
+            enhancePhase = .error(EnhanceError(
+                title: "Accessibility permission is off",
+                guidance: "enprompt needs Accessibility to read what you select. Open Settings → Setup and grant it.",
+                fix: .accessibility
+            ))
             DebugLogger.log("ENHANCE SKIPPED: not trusted")
             return
         }
@@ -501,7 +609,11 @@ final class AppState: ObservableObject {
                 await enhanceToClipboard(selection)
                 return
             }
-            enhancePhase = .error("No text found — select the text first (or copy it with ⌘C) and try again")
+            enhancePhase = .error(EnhanceError(
+                title: "No text found",
+                guidance: "Select the text you want to work with first (or copy it with ⌘C and try again).",
+                fix: nil
+            ))
             DebugLogger.log("ENHANCE SKIPPED: no focused editable input after retries — \(AXService.focusedElementDebugInfo())")
             return
         }
@@ -535,7 +647,11 @@ final class AppState: ObservableObject {
             // Safety net: never send UI chrome to the LLM or write it back.
             if textToEnhance.isEmpty || textToEnhance.contains("ctrl+p") || textToEnhance.contains("OpenCode") || textToEnhance.contains("•") || textToEnhance.contains("·") {
                 DebugLogger.log("ENHANCE SKIPPED: terminal input line looks like UI chrome")
-                enhancePhase = .error("No input text found in the terminal prompt")
+                enhancePhase = .error(EnhanceError(
+                    title: "No input text found in the terminal prompt",
+                    guidance: "Type a command first, then double-tap ⌥ - or press ⌘C after selecting and try again.",
+                    fix: nil
+                ))
                 return
             }
             // A selection is used only when it is part of the input line.
@@ -566,7 +682,11 @@ final class AppState: ObservableObject {
         }
 
         guard !textToEnhance.isEmpty else {
-            enhancePhase = .error("No input text found\(isTerminal ? " in the terminal prompt" : "")")
+            enhancePhase = .error(EnhanceError(
+                title: "No input text found",
+                guidance: "Type something first\(isTerminal ? " in the terminal prompt" : ""), then try again.",
+                fix: nil
+            ))
             DebugLogger.log("ENHANCE SKIPPED: empty text")
             return
         }
@@ -687,7 +807,7 @@ final class AppState: ObservableObject {
             }
             }
         } catch {
-            enhancePhase = .error((error as? LLMError)?.userFacingMessage ?? "Something went wrong while enhancing. Please try again.")
+            enhancePhase = .error(Self.enhanceError(from: error))
             NSSound(named: "Sosumi")?.play()
             DebugLogger.log("ENHANCE FAILED: \(error.localizedDescription)")
         }
@@ -699,7 +819,11 @@ final class AppState: ObservableObject {
     private func enhanceToClipboard(_ text: String) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            enhancePhase = .error("No input text found")
+            enhancePhase = .error(EnhanceError(
+                title: "No input text found",
+                guidance: "Select or type the text you want to work with, then try again.",
+                fix: nil
+            ))
             return
         }
         isEnhancing = true
@@ -730,7 +854,7 @@ final class AppState: ObservableObject {
             NSSound(named: "Glass")?.play()
             DebugLogger.log("ENHANCED \(trimmed.count) -> \(enhanced.count) chars to clipboard in \(elapsed)s")
         } catch {
-            enhancePhase = .error((error as? LLMError)?.userFacingMessage ?? "Something went wrong. Please try again.")
+            enhancePhase = .error(Self.enhanceError(from: error))
             NSSound(named: "Sosumi")?.play()
             DebugLogger.log("ENHANCE FAILED: \(error.localizedDescription)")
         }
@@ -747,7 +871,11 @@ final class AppState: ObservableObject {
         let systemPromptForReply: String
         if let preset {
             guard let prompt = LLMClient.promptPresets[preset] else {
-                enhancePhase = .error("Preset '\(preset)' not found")
+                enhancePhase = .error(EnhanceError(
+                    title: "That reply style isn't available anymore",
+                    guidance: "Pick another style from the menu, or choose Custom prompt.",
+                    fix: nil
+                ))
                 return
             }
             systemPromptForReply = prompt
@@ -755,7 +883,11 @@ final class AppState: ObservableObject {
             systemPromptForReply = systemPrompt
         }
         guard !systemPromptForReply.isEmpty else {
-            enhancePhase = .error("No system prompt set — pick a reply preset in Settings → System Prompt")
+            enhancePhase = .error(EnhanceError(
+                title: "No reply style is set",
+                guidance: "Open Settings → System Prompt, pick a reply preset (X.com, Email or Founder) and press Save.",
+                fix: .systemPrompt
+            ))
             return
         }
 
@@ -774,7 +906,11 @@ final class AppState: ObservableObject {
         }
         guard let text = source?.trimmingCharacters(in: .whitespacesAndNewlines),
               !text.isEmpty else {
-            enhancePhase = .error("Select the post text first (or copy it with ⌘C), then press Prepare reply")
+            enhancePhase = .error(EnhanceError(
+                title: "No text to reply to",
+                guidance: "Select the post text first (or copy it with ⌘C), then press Prepare reply again.",
+                fix: nil
+            ))
             DebugLogger.log("REPLY SKIPPED: no selection — \(AXService.focusedElementDebugInfo())")
             return
         }
@@ -812,7 +948,7 @@ final class AppState: ObservableObject {
             NSSound(named: "Glass")?.play()
             DebugLogger.log("REPLY READY: \(text.count) -> \(enhanced.count) chars on clipboard in \(elapsed)s")
         } catch {
-            enhancePhase = .error((error as? LLMError)?.userFacingMessage ?? "Something went wrong. Please try again.")
+            enhancePhase = .error(Self.enhanceError(from: error))
             NSSound(named: "Sosumi")?.play()
             DebugLogger.log("REPLY FAILED: \(error.localizedDescription)")
         }
@@ -1046,12 +1182,20 @@ final class AppState: ObservableObject {
         guard !isListening, !isEnhancing else { return }
         let (mic, speech) = await SpeechTranscriber.requestPermissions()
         guard mic else {
-            enhancePhase = .error("Microphone permission denied - enable it in System Settings")
+            enhancePhase = .error(EnhanceError(
+                title: "Microphone permission is off",
+                guidance: "Dictation needs the mic. Open System Settings → Privacy & Security → Microphone and enable enprompt.",
+                fix: .privacyPane
+            ))
             DebugLogger.log("DICTATION FAILED: no microphone permission")
             return
         }
         guard speech else {
-            enhancePhase = .error("Speech recognition permission denied")
+            enhancePhase = .error(EnhanceError(
+                title: "Speech recognition permission is off",
+                guidance: "Open System Settings → Privacy & Security → Speech Recognition and enable enprompt.",
+                fix: .privacyPane
+            ))
             DebugLogger.log("DICTATION FAILED: no speech recognition permission")
             return
         }
@@ -1091,7 +1235,11 @@ final class AppState: ObservableObject {
         case .success(let text):
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
-                enhancePhase = .error("No speech detected")
+                enhancePhase = .error(EnhanceError(
+                    title: "No speech detected",
+                    guidance: "Hold ⌥, then speak closer to the mic and release to insert.",
+                    fix: nil
+                ))
                 DebugLogger.log("DICTATION: no speech")
                 return
             }
@@ -1111,7 +1259,7 @@ final class AppState: ObservableObject {
                 DebugLogger.log("DICTATION: no focused field, copied to clipboard")
             }
         case .failure(let error):
-            enhancePhase = .error((error as? LLMError)?.userFacingMessage ?? "Dictation didn't go through. Please try again.")
+            enhancePhase = .error(Self.enhanceError(from: error))
             DebugLogger.log("DICTATION FAILED: \(error.localizedDescription)")
         }
     }
@@ -1131,7 +1279,11 @@ final class AppState: ObservableObject {
             return
         }
         guard config.isConfigured else {
-            enhancePhase = .error("Add an API key in Settings first")
+            enhancePhase = .error(EnhanceError(
+                title: "No AI provider is set up yet",
+                guidance: "Open Settings and paste your API key - or pick Ollama for a free local setup.",
+                fix: .llm
+            ))
             DebugLogger.log("VISUAL CAPTURE: no LLM configured")
             return
         }
@@ -1139,7 +1291,11 @@ final class AppState: ObservableObject {
 
         if !ScreenCapture.isAuthorized {
             Task { await ScreenCapture.requestPermission() }
-            enhancePhase = .error("Screen Recording permission needed - click Allow in the system prompt (enprompt restarts itself)")
+            enhancePhase = .error(EnhanceError(
+                title: "Screen Recording permission is off",
+                guidance: "Click Allow on the system prompt that just appeared (enprompt restarts itself), then try again.",
+                fix: .privacyPane
+            ))
             DebugLogger.log("VISUAL CAPTURE: no screen recording permission")
             return
         }
@@ -1195,7 +1351,11 @@ final class AppState: ObservableObject {
                     CGImageSourceCreateImageAtIndex($0, 0, nil)
                 })
             else {
-                enhancePhase = .error("Screen capture failed - click Allow in the Screen Recording prompt and try again")
+                enhancePhase = .error(EnhanceError(
+                    title: "Screen capture failed",
+                    guidance: "Make sure Screen Recording is allowed in System Settings → Privacy & Security, then try again.",
+                    fix: .privacyPane
+                ))
                 DebugLogger.log("VISUAL CAPTURE: capture returned nil")
                 return
             }
@@ -1206,7 +1366,11 @@ final class AppState: ObservableObject {
             )
             let rep = NSBitmapImageRep(cgImage: annotated)
             guard let annotatedJPEG = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.55]) else {
-                enhancePhase = .error("Screen capture failed")
+                enhancePhase = .error(EnhanceError(
+                    title: "Screen capture failed",
+                    guidance: "Please try again.",
+                    fix: nil
+                ))
                 return
             }
 
@@ -1232,7 +1396,7 @@ final class AppState: ObservableObject {
                 enhancePhase = .success("Pasted, saved & copied to clipboard (\(prompt.count) chars)")
                 DebugLogger.log("VISUAL CAPTURE: pasted + saved + copied \(prompt.count) chars")
             } catch {
-                enhancePhase = .error((error as? LLMError)?.userFacingMessage ?? "The AI couldn't read your drawing. Please try again.")
+                enhancePhase = .error(Self.enhanceError(from: error))
                 DebugLogger.log("VISUAL CAPTURE FAILED: \(error.localizedDescription)")
             }
         }

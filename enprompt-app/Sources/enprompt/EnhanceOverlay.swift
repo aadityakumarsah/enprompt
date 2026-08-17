@@ -214,12 +214,19 @@ struct EnhanceOverlayView: View {
                     .lineLimit(2)
                 Spacer(minLength: 0)
 
-            case .error(let message):
+            case .error(let error):
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
-                Text(message)
-                    .font(.callout)
-                    .lineLimit(3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(error.title)
+                        .font(.callout)
+                        .fontWeight(.semibold)
+                        .lineLimit(1)
+                    Text(error.guidance)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
                 Spacer(minLength: 0)
 
             case .idle:
