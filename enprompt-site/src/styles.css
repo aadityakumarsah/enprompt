@@ -1030,3 +1030,14 @@ body {
 @media (max-width: 720px) {
   .sp-preset-cols { grid-template-columns: 1fr; }
 }
+.nav-actions { display: flex; align-items: center; gap: 12px; }
+.nav-github {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  color: var(--muted);
+  transition: color 0.2s ease, background 0.2s ease;
+}
+.nav-github:hover { color: var(--text); background: rgba(38, 27, 14, 0.06); }
