@@ -24,6 +24,17 @@ final class StatusItemController: NSObject {
             button.sendAction(on: [.leftMouseUp])
         }
         statusItem = item
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(showPopoverRequested(_:)),
+            name: .enpromptShowPopover,
+            object: nil
+        )
+    }
+
+    @objc private func showPopoverRequested(_ note: Notification) {
+        if let popover, popover.isShown { return }
+        showPopover()
     }
 
     /// The enprompt logo (mac-nav-icon.icns from the app bundle), sized for the

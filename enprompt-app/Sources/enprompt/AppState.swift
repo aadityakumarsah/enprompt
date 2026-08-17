@@ -4,6 +4,12 @@ import Foundation
 import ImageIO
 import Speech
 
+extension Notification.Name {
+    /// Asks the menu bar controller to show the popover (e.g. when a teach
+    /// run starts from the ⌥T shortcut, so progress is visible).
+    static let enpromptShowPopover = Notification.Name("enprompt.showPopover")
+}
+
 struct EnhanceStatus: Equatable {
     let isError: Bool
     let message: String
@@ -62,6 +68,64 @@ final class AppState: ObservableObject {
     /// Transient confirmation after saving a system prompt preset, e.g.
     /// "Saved — X.com (Twitter) reply is now the active prompt".
     @Published var promptSavedMessage: String? = nil
+
+    // MARK: - Teach me (explain like a five-year-old, then speak it locally)
+
+    /// Master switch for the "Teach me" feature - optional by design, so
+    /// people who don't want it never see it trigger.
+    @Published var teachEnabled: Bool
+    /// BCP-47 tag of the language the explanation is written and spoken in.
+    @Published var teachLanguageID: String
+    /// Identifier of the chosen Apple voice; empty = best available for the language.
+    @Published var teachVoiceID: String
+    /// Speaking rate for Apple voices (AVSpeechSynthesizer, ~0.30–0.55).
+    @Published var teachRate: Double
+    /// True while the LLM is writing the explanation.
+    @Published private(set) var isTeaching = false
+    /// The last explanation, shown in the popover so users can read along.
+    @Published var teachText = ""
+    /// True while a voice is actually speaking (Apple or Piper).
+    @Published var isSpeaking = false
+    /// Non-nil while the free Piper voice is downloading (0...1).
+    @Published var piperInstallProgress: Double?
+    @Published var piperError: String?
+    /// True while the free Edge neural voice helper is installing.
+    @Published private(set) var edgeInstalling = false
+    @Published var edgeError: String?
+    /// Which free voice engine speaks the explanation: Edge neural voices
+    /// (most natural, need a one-time free helper install) or Apple's
+    /// built-in voices (always offline). Nepali falls back to Piper when the
+    /// Apple engine is chosen.
+    @Published var teachEngine: TeachVoiceEngine
+
+    /// The live speaking task (Piper path); cancelled by the Stop button.
+    private var speakTask: Task<Void, Never>?
+    /// The in-flight teach run, so the Stop button can cancel the LLM call.
+    private var teachTask: Task<Void, Never>?
+    /// The in-flight enhance run, so the Stop button can cancel the LLM call.
+    private var enhanceTask: Task<Void, Never>?
+    /// On-screen teaching: the explanation floats over the screen with the
+    /// spoken word highlighted (optional, Settings).
+    @Published var teachOverlayEnabled: Bool
+    private let teachOverlay = TeachOverlayController()
+    private var overlayHideTask: Task<Void, Never>?
+    /// Frame of the selected text, captured when the selection is read (the
+    /// popover opening right after would otherwise move focus and break it).
+    private var pendingTeachBounds: CGRect?
+    /// Apple's on-device synthesizer with the natural Siri-quality voices.
+    private let speechSynthesizer = AVSpeechSynthesizer()
+    private lazy var speechDelegate: SpeechDelegate = {
+        let delegate = SpeechDelegate { [weak self] in
+            self?.isSpeaking = false
+            self?.scheduleOverlayHide()
+        }
+        delegate.onWillSpeak = { [weak self] range in
+            self?.teachOverlay.update(range: range)
+        }
+        return delegate
+    }()
+
+    var activeTeachLanguage: TeachLanguage { SpeechKit.language(for: teachLanguageID) }
 
     /// Push-to-talk dictation: hold Option to speak, release to insert.
     @Published var isListening = false
@@ -140,6 +204,12 @@ final class AppState: ObservableObject {
         visualCaptureEnabled = defaults.object(forKey: "visualCaptureEnabled") as? Bool ?? true
         capturedPrompts = defaults.stringArray(forKey: "capturedPrompts") ?? []
         totalTokens = defaults.integer(forKey: "tokenUsageTotal")
+        teachEnabled = defaults.object(forKey: "teachEnabled") as? Bool ?? true
+        teachLanguageID = defaults.string(forKey: "teachLanguageID") ?? "en-US"
+        teachVoiceID = defaults.string(forKey: "teachVoiceID") ?? ""
+        teachRate = defaults.object(forKey: "teachRate") as? Double ?? 0.45
+        teachEngine = TeachVoiceEngine(rawValue: defaults.string(forKey: "teachEngine") ?? "") ?? .edge
+        teachOverlayEnabled = defaults.object(forKey: "teachOverlayEnabled") as? Bool ?? true
         if let raw = defaults.string(forKey: "provider"), let provider = LLMProvider(rawValue: raw) {
             self.provider = provider
         }
@@ -267,6 +337,28 @@ final class AppState: ObservableObject {
     }
 
     /// Turns any thrown error into a friendly, actionable EnhanceError.
+    /// Strips markdown and list noise from an explanation so the text-to-
+    /// speech voice never reads symbols aloud: leading bullets, numbered
+    /// items, headings, bold markers, and collapsed blank runs. Applied to
+    /// every teach result - some models leak formatting despite the prompt.
+    static func cleanForSpeech(_ text: String) -> String {
+        let lines = text.components(separatedBy: .newlines).map { line in
+            var l = line
+            l = l.replacingOccurrences(
+                of: #"^\s*(?:[-*•]|#+\s*|\d+[.)])\s*"#,
+                with: "",
+                options: .regularExpression
+            )
+            l = l.replacingOccurrences(of: #"\*\*|__"#, with: "")
+            return l
+        }
+        let joined = lines
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .joined(separator: "\n")
+            .replacingOccurrences(of: "\n{3,}", with: "\n\n", options: .regularExpression)
+        return joined.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func enhanceError(from error: Error) -> EnhanceError {
         guard let llm = error as? LLMError else {
             return EnhanceError(
@@ -884,7 +976,7 @@ final class AppState: ObservableObject {
                 systemPrompt: systemPrompt
             ) { [weak self] progress in
                 Task { @MainActor in
-                    self?.enhancePhase = .enhancing(progress)
+                    self?.enhancePhase = .enhancing(progress.count)
                 }
             }
             guard !enhanced.isEmpty else { throw LLMError.emptyResponse }
@@ -983,6 +1075,11 @@ final class AppState: ObservableObject {
             }
             }
         } catch {
+            if Task.isCancelled {
+                enhancePhase = .idle
+                DebugLogger.log("ENHANCE CANCELLED")
+                return
+            }
             enhancePhase = .error(Self.enhanceError(from: error))
             NSSound(named: "Sosumi")?.play()
             DebugLogger.log("ENHANCE FAILED: \(error.localizedDescription)")
@@ -1016,7 +1113,7 @@ final class AppState: ObservableObject {
                 systemPrompt: systemPrompt
             ) { [weak self] progress in
                 Task { @MainActor in
-                    self?.enhancePhase = .enhancing(progress)
+                    self?.enhancePhase = .enhancing(progress.count)
                 }
             }
             guard !enhanced.isEmpty else { throw LLMError.emptyResponse }
@@ -1063,7 +1160,7 @@ final class AppState: ObservableObject {
                 systemPrompt: systemPrompt
             ) { [weak self] progress in
                 Task { @MainActor in
-                    self?.enhancePhase = .enhancing(progress)
+                    self?.enhancePhase = .enhancing(progress.count)
                 }
             }
             guard !enhanced.isEmpty else { throw LLMError.emptyResponse }
@@ -1155,7 +1252,7 @@ final class AppState: ObservableObject {
                 systemPrompt: systemPromptOverride
             ) { [weak self] progress in
                 Task { @MainActor in
-                    self?.enhancePhase = .enhancing(progress)
+                    self?.enhancePhase = .enhancing(progress.count)
                 }
             }
             guard !enhanced.isEmpty else { throw LLMError.emptyResponse }
@@ -1172,6 +1269,430 @@ final class AppState: ObservableObject {
             enhancePhase = .error(Self.enhanceError(from: error))
             NSSound(named: "Sosumi")?.play()
             DebugLogger.log("REPLY FAILED: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Teach me (explain like a five-year-old, then speak it locally)
+
+    func setTeachEnabled(_ enabled: Bool) {
+        teachEnabled = enabled
+        defaults.set(enabled, forKey: "teachEnabled")
+        if !enabled {
+            stopSpeaking()
+        }
+        DebugLogger.log("TEACH: feature \(enabled ? "enabled" : "disabled")")
+    }
+
+    func setTeachLanguage(_ id: String) {
+        teachLanguageID = id
+        teachVoiceID = ""
+        defaults.set(id, forKey: "teachLanguageID")
+        defaults.set("", forKey: "teachVoiceID")
+        DebugLogger.log("TEACH: language -> \(id)")
+    }
+
+    func setTeachVoice(_ identifier: String) {
+        teachVoiceID = identifier
+        defaults.set(identifier, forKey: "teachVoiceID")
+    }
+
+    func setTeachRate(_ rate: Double) {
+        teachRate = rate
+        defaults.set(rate, forKey: "teachRate")
+    }
+
+    func setTeachEngine(_ engine: TeachVoiceEngine) {
+        teachEngine = engine
+        defaults.set(engine.rawValue, forKey: "teachEngine")
+        DebugLogger.log("TEACH: voice engine -> \(engine.rawValue)")
+    }
+
+    func setTeachOverlayEnabled(_ enabled: Bool) {
+        teachOverlayEnabled = enabled
+        defaults.set(enabled, forKey: "teachOverlayEnabled")
+        if !enabled {
+            teachOverlay.hide()
+        }
+        DebugLogger.log("TEACH: on-screen overlay \(enabled ? "enabled" : "disabled")")
+    }
+
+    /// Shows the on-screen teaching overlay for the text about to be spoken,
+    /// with a glow around the selected text when Accessibility can locate it.
+    private func showTeachOverlay(_ text: String) {
+        guard teachOverlayEnabled, !text.isEmpty else { return }
+        overlayHideTask?.cancel()
+        teachOverlay.show(
+            text: text,
+            highlightRect: pendingTeachBounds
+        )
+        pendingTeachBounds = nil
+    }
+
+    /// Dismisses the overlay a few seconds after speech ends, so it doesn't
+    /// sit on screen forever. Esc hides it instantly at any time.
+    private func scheduleOverlayHide() {
+        guard teachOverlayEnabled else { return }
+        overlayHideTask?.cancel()
+        overlayHideTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.teachOverlay.hide()
+        }
+    }
+
+    /// One-time free install of the Edge neural voice helper (~5 MB).
+    /// After this, every language gets the most natural voices, unlimited.
+    func installEdgeVoices() async {
+        guard !edgeInstalling else { return }
+        edgeInstalling = true
+        edgeError = nil
+        defer { edgeInstalling = false }
+        do {
+            try await SpeechKit.installEdge()
+            DebugLogger.log("EDGE: neural voices installed")
+        } catch {
+            edgeError = (error as? SpeechError)?.errorDescription ?? "The install failed - check your internet connection and try again."
+            DebugLogger.log("EDGE: install failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// ⌥T shortcut handler: starts teaching, or stops what's in flight when
+    /// something is already running (press T again to stop). Returns true
+    /// when enprompt swallowed the key, false to pass it through.
+    func handleTeachShortcut() -> Bool {
+        guard teachEnabled else { return false }
+        if isTeaching || isSpeaking {
+            DebugLogger.log("OPTION+T — stopping current teach/speech")
+            stopAll()
+            return true
+        }
+        DebugLogger.log("OPTION+T — teaching selected text")
+        startTeach()
+        return true
+    }
+
+    /// Starts the teach flow on a tracked task so the Stop button can cancel
+    /// it mid-generation. Ignores a second press while one is already running.
+    func startTeach() {
+        guard teachTask == nil else {
+            DebugLogger.log("TEACH SKIPPED: already running")
+            return
+        }
+        // Open the popover so the user can watch the explanation being
+        // written live and reach the Stop button (menu bar icon tap toggles).
+        NotificationCenter.default.post(name: .enpromptShowPopover, object: nil)
+        teachTask = Task { [weak self] in
+            await self?.teachSelectedText()
+            self?.teachTask = nil
+        }
+    }
+
+    /// Starts the enhance flow on a tracked task so the Stop button can cancel
+    /// it mid-generation. Ignores a second press while one is already running.
+    func startEnhance() {
+        guard enhanceTask == nil else {
+            DebugLogger.log("ENHANCE SKIPPED: already running")
+            return
+        }
+        enhanceTask = Task { [weak self] in
+            await self?.enhanceFocusedText()
+            self?.enhanceTask = nil
+        }
+    }
+
+    /// Stops everything in flight: an ongoing teach or enhance LLM call, and
+    /// any voice still speaking (Apple or Piper).
+    func stopAll() {
+        teachTask?.cancel()
+        teachTask = nil
+        enhanceTask?.cancel()
+        enhanceTask = nil
+        stopSpeaking()
+        teachOverlay.hide()
+        overlayHideTask?.cancel()
+        if case .enhancing = enhancePhase {
+            enhancePhase = .idle
+        }
+        DebugLogger.log("STOP requested")
+    }
+
+    /// The "Teach me" flow: read the user's selection, ask the LLM to
+    /// explain it completely like a five-year-old would understand (in the
+    /// chosen language), then speak it with a natural local voice.
+    func teachSelectedText() async {
+        guard !isTeaching else {
+            DebugLogger.log("TEACH SKIPPED: already teaching")
+            return
+        }
+        guard teachEnabled else {
+            enhancePhase = .error(EnhanceError(
+                title: "Teach me is turned off",
+                guidance: "Enable it in Settings → Teach me & Voice - it's optional, so you stay in control.",
+                fix: .llm
+            ))
+            return
+        }
+        guard config.isConfigured else {
+            enhancePhase = .error(EnhanceError(
+                title: "No AI provider is set up yet",
+                guidance: "Open Settings and paste your API key - or pick Ollama for a free local setup.",
+                fix: .llm
+            ))
+            DebugLogger.log("TEACH SKIPPED: no LLM configured")
+            return
+        }
+
+        // Find the text to teach: live selection, cached selection, focused
+        // editable field, then the clipboard as a last resort.
+        var source: String?
+        var usedLiveElement = false
+        if let selection = AXService.focusedSelection(), !selection.isEmpty {
+            source = selection
+            usedLiveElement = true
+        }
+        if source == nil || source!.isEmpty {
+            source = AXService.focusedTextInput()?.text
+            if source != nil, !source!.isEmpty {
+                usedLiveElement = true
+            }
+        }
+        if source == nil || source!.isEmpty {
+            source = NSPasteboard.general.string(forType: .string)
+            if let s = source, !s.isEmpty {
+                DebugLogger.log("TEACH using clipboard text (\(s.count) chars)")
+            }
+        }
+        guard let text = source?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else {
+            enhancePhase = .error(EnhanceError(
+                title: "No text to teach",
+                guidance: "Select the text first (or copy it with ⌘C), then press Teach me - or hold ⌥ and press T.",
+                fix: nil
+            ))
+            DebugLogger.log("TEACH SKIPPED: no text found")
+            return
+        }
+
+        // Capture the on-screen frame of the selected text NOW - at the moment
+        // we read it - because the popover opens right after and steals focus,
+        // which would make the glow box point at the wrong thing later.
+        pendingTeachBounds = usedLiveElement ? AXService.focusedElementBounds() : nil
+
+        let language = activeTeachLanguage
+        if teachEngine == .apple, language.usesPiper, !SpeechKit.piperInstalled {
+            enhancePhase = .error(EnhanceError(
+                title: "The Nepali voice isn't downloaded yet",
+                guidance: "Open Settings → Teach me & Voice and tap Download Nepali voice - free, one time, then it works offline.",
+                fix: .llm
+            ))
+            DebugLogger.log("TEACH SKIPPED: piper voice missing")
+            return
+        }
+        if teachEngine == .edge, !SpeechKit.edgeInstalled {
+            enhancePhase = .error(EnhanceError(
+                title: "The free neural voices aren't installed yet",
+                guidance: "Open Settings → Teach me & Voice and tap Install neural voices (free) - one time, ~5 MB, no account.",
+                fix: .llm
+            ))
+            DebugLogger.log("TEACH SKIPPED: edge helper missing")
+            return
+        }
+
+        isTeaching = true
+        teachText = ""
+        enhancePhase = .enhancing(0)
+        NSSound(named: "Tink")?.play()
+        defer { isTeaching = false }
+
+        let startedAt = Date()
+        do {
+            DebugLogger.log("TEACHING \(text.count) chars in \(language.id) via \(config.provider.rawValue)/\(config.model)")
+            let explanation = try await LLMClient.enhance(
+                text,
+                config: config,
+                systemPrompt: LLMClient.teachSystemPrompt(for: language)
+            ) { [weak self] partial in
+                Task { @MainActor in
+                    // Stream the words live so the user can watch the
+                    // explanation being written and see exactly what's
+                    // happening (and stop it at any moment).
+                    self?.enhancePhase = .enhancing(partial.count)
+                    self?.teachText = partial
+                }
+            }
+            guard !explanation.isEmpty else { throw LLMError.emptyResponse }
+            recordUsage(promptText: LLMClient.teachSystemPrompt(for: language) + "\n" + text, completionText: explanation)
+            let elapsed = String(format: "%.1f", Date().timeIntervalSince(startedAt))
+            // The prompt asks for plain spoken language, but small models may
+            // still leak markdown: strip it so the voice never reads garbage.
+            let clean = Self.cleanForSpeech(explanation)
+            teachText = clean
+            // Always mirror into the clipboard so the explanation can be
+            // re-read or pasted even while the voice plays.
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(clean, forType: .string)
+            enhancePhase = .success("Explained like you're five (\(elapsed)s) — listening & copied to clipboard")
+            DebugLogger.log("TEACH READY: \(text.count) -> \(clean.count) chars in \(elapsed)s (language \(language.id))")
+            await speak(text: clean, language: language)
+        } catch {
+            if Task.isCancelled {
+                teachText = ""
+                enhancePhase = .idle
+                DebugLogger.log("TEACH CANCELLED")
+                return
+            }
+            enhancePhase = .error(Self.enhanceError(from: error))
+            NSSound(named: "Sosumi")?.play()
+            DebugLogger.log("TEACH FAILED: \(error.localizedDescription)")
+        }
+    }
+
+    /// Speaks a text with the chosen free engine: Edge neural voices (the
+    /// most natural - used for every language when selected), Apple's
+    /// built-in voices, or Piper for Nepali when on the Apple engine.
+    private func speak(text: String, language: TeachLanguage) async {
+        stopSpeaking()
+        showTeachOverlay(text)
+        if teachEngine == .edge {
+            guard SpeechKit.edgeInstalled else {
+                enhancePhase = .error(EnhanceError(
+                    title: "The free neural voices aren't installed yet",
+                    guidance: "Open Settings → Teach me & Voice and tap Install neural voices (free) - one time, ~5 MB, no account.",
+                    fix: .llm
+                ))
+                DebugLogger.log("TEACH speak skipped: edge helper missing")
+                return
+            }
+            isSpeaking = true
+            let task = Task { [weak self] in
+                do {
+                    let rate = self?.teachRate ?? 0.45
+                    try await SpeechKit.speakEdge(
+                        text,
+                        voice: SpeechKit.edgeVoice(for: language.id),
+                        rate: rate,
+                        onPlaybackProgress: { fraction in
+                            Task { @MainActor in
+                                self?.teachOverlay.update(fraction: fraction, textLength: text.utf16.count)
+                            }
+                        },
+                        onWord: { range in
+                            Task { @MainActor in
+                                self?.teachOverlay.update(range: range)
+                            }
+                        }
+                    )
+                } catch {
+                    DebugLogger.log("TEACH edge speak failed: \(error.localizedDescription)")
+                }
+                await MainActor.run { self?.isSpeaking = false }
+            }
+            speakTask = task
+        } else if language.usesPiper {
+            guard SpeechKit.piperInstalled else { return }
+            isSpeaking = true
+            let task = Task { [weak self] in
+                do {
+                    try await SpeechKit.speakPiper(text) { fraction in
+                        Task { @MainActor in
+                            self?.teachOverlay.update(fraction: fraction, textLength: text.utf16.count)
+                        }
+                    }
+                } catch {
+                    DebugLogger.log("TEACH piper speak failed: \(error.localizedDescription)")
+                }
+                await MainActor.run { self?.isSpeaking = false }
+            }
+            speakTask = task
+        } else {
+            let voice: AVSpeechSynthesisVoice?
+            if !teachVoiceID.isEmpty {
+                voice = AVSpeechSynthesisVoice(identifier: teachVoiceID)
+            } else {
+                voice = SpeechKit.bestAppleVoice(for: teachLanguageID)
+            }
+            guard let voice else {
+                enhancePhase = .error(EnhanceError(
+                    title: "No voice found for \(language.displayName)",
+                    guidance: "Open Settings → Teach me & Voice and pick another language or voice.",
+                    fix: .llm
+                ))
+                return
+            }
+            let utterance = AVSpeechUtterance(string: text)
+            utterance.voice = voice
+            utterance.rate = Float(teachRate)
+            utterance.pitchMultiplier = 1.05
+            speechSynthesizer.delegate = speechDelegate
+            isSpeaking = true
+            speechSynthesizer.speak(utterance)
+        }
+    }
+
+    /// Speaks the current explanation again (the "Listen again" button).
+    func speakTeachAgain() {
+        guard !teachText.isEmpty else { return }
+        Task { await speak(text: teachText, language: activeTeachLanguage) }
+    }
+
+    /// Stops whatever is speaking - Apple or Piper - instantly.
+    func stopSpeaking() {
+        speechSynthesizer.stopSpeaking(at: .immediate)
+        speakTask?.cancel()
+        speakTask = nil
+        isSpeaking = false
+    }
+
+    /// Plays a one-line sample of the chosen language/voice (Settings).
+    func previewTeachVoice() async {
+        stopSpeaking()
+        let language = activeTeachLanguage
+        let sentence = SpeechKit.previewSentence(for: language)
+        if teachEngine == .edge {
+            guard SpeechKit.edgeInstalled else {
+                edgeError = "The free neural voices aren't installed yet - tap Install neural voices first."
+                return
+            }
+            Task { try? await SpeechKit.speakEdge(sentence, voice: SpeechKit.edgeVoice(for: language.id), rate: teachRate) }
+        } else if language.usesPiper {
+            guard SpeechKit.piperInstalled else {
+                piperError = "The Nepali voice isn't downloaded yet - tap Download Nepali voice first."
+                return
+            }
+            Task { try? await SpeechKit.speakPiper(sentence) }
+        } else {
+            let voice = teachVoiceID.isEmpty
+                ? SpeechKit.bestAppleVoice(for: teachLanguageID)
+                : AVSpeechSynthesisVoice(identifier: teachVoiceID)
+            guard let voice else {
+                piperError = "No voice is available for \(language.displayName) on this Mac."
+                return
+            }
+            let utterance = AVSpeechUtterance(string: sentence)
+            utterance.voice = voice
+            utterance.rate = Float(teachRate)
+            speechSynthesizer.delegate = speechDelegate
+            speechSynthesizer.speak(utterance)
+        }
+    }
+
+    /// One-time download of the free Piper engine + Nepali voice (~100 MB).
+    /// After this, Nepali works fully offline.
+    func installPiperVoice() async {
+        guard piperInstallProgress == nil else { return }
+        piperInstallProgress = 0
+        piperError = nil
+        defer { piperInstallProgress = nil }
+        do {
+            try await SpeechKit.installPiper { [weak self] fraction in
+                Task { @MainActor in
+                    self?.piperInstallProgress = fraction
+                }
+            }
+            DebugLogger.log("PIPER: Nepali voice installed")
+        } catch {
+            piperError = (error as? SpeechError)?.errorDescription ?? "The voice download failed - please try again."
+            DebugLogger.log("PIPER: install failed: \(error.localizedDescription)")
         }
     }
 
@@ -1661,5 +2182,31 @@ final class AppState: ObservableObject {
         capturedPrompts.remove(at: index)
         defaults.set(capturedPrompts, forKey: "capturedPrompts")
         DebugLogger.log("CAPTURED PROMPT removed")
+    }
+}
+
+/// AVSpeechSynthesizer delegate: flips the "speaking" flag off when a
+/// sentence finishes (or is cancelled). Callbacks arrive on the thread that
+/// called speak() - the main thread for this app.
+private final class SpeechDelegate: NSObject, AVSpeechSynthesizerDelegate {
+    var onFinish: (() -> Void)?
+    /// Called with the exact character range about to be spoken, so the
+    /// on-screen overlay can highlight the current word live.
+    var onWillSpeak: ((NSRange) -> Void)?
+
+    init(onFinish: @escaping () -> Void) {
+        self.onFinish = onFinish
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        onFinish?()
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        onFinish?()
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange, utterance: AVSpeechUtterance) {
+        onWillSpeak?(characterRange)
     }
 }

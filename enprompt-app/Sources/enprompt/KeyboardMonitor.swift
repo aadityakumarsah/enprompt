@@ -31,6 +31,11 @@ final class KeyboardMonitor {
     /// swallow it (e.g. finishing/cancelling visual capture dictation).
     var onEscapeKey: (() -> Bool)?
 
+    /// Called when Option+T is pressed (⌥ held, then T - no other modifier).
+    /// Return true to swallow the key (enprompt handled it); false lets the
+    /// focused app receive a normal Option+T.
+    var onOptionT: (() -> Bool)?
+
     private static let doubleTapWindow: TimeInterval = 0.8
     // Dictation starts after Option has been held this long.
     private static let holdThreshold: TimeInterval = 1.25
@@ -178,6 +183,16 @@ final class KeyboardMonitor {
         // enprompt gesture. Drop every tap/hold candidate so the combo can
         // never trigger a double-tap, triple-tap, or dictation.
         if type == .keyDown, event.flags.contains(.maskAlternate) {
+            // ⌥T alone = "Teach me": explain the selected text like a
+            // five-year-old and speak it. Only swallowed when enprompt
+            // actually handles it - otherwise Option+T behaves normally.
+            if isPlainOptionT(event) {
+                let handled = onOptionT?() == true
+                resetGestureState()
+                if handled {
+                    return nil
+                }
+            }
             let holdWasActive: Bool
             if let down = optionDownAt {
                 holdWasActive = CFAbsoluteTimeGetCurrent() - down >= Self.holdThreshold
@@ -212,6 +227,7 @@ final class KeyboardMonitor {
 
     private static let zKeyCode: CGKeyCode = 6
     private static let escapeKeyCode: CGKeyCode = 53
+    private static let tKeyCode: CGKeyCode = 17
 
     private func isPlainUndoKey(_ event: CGEvent) -> Bool {
         let flags = event.flags
@@ -223,6 +239,16 @@ final class KeyboardMonitor {
 
     /// True when Option was just pressed down with no other modifier held.
     private func isPlainOptionTap(_ event: CGEvent) -> Bool {
+        let common: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn]
+        return event.flags.intersection(common) == [.maskAlternate]
+    }
+
+    /// True for a plain Option+T: Option held, T pressed, and no Command,
+    /// Control, Shift or Fn modifier - a combo that must have started from a
+    /// plain Option press so ⌥T never fires after ⌥⌘/⌥⇧ combos.
+    private func isPlainOptionT(_ event: CGEvent) -> Bool {
+        guard event.getIntegerValueField(.keyboardEventKeycode) == Self.tKeyCode,
+              optionDownAt != nil else { return false }
         let common: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn]
         return event.flags.intersection(common) == [.maskAlternate]
     }

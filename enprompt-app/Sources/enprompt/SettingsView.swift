@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import SwiftUI
 
 struct SettingsView: View {
@@ -154,6 +155,73 @@ struct SettingsView: View {
                 Text("Double-tap the ⌥ Option key to expand the text you're typing via the LLM. Hold ⌥ Option for 1.25 seconds, then speak - release to insert at your cursor. Triple-tap ⌥ to open the drawing canvas: the mic listens automatically - draw over the screen and speak at the same time. Press Esc to finish: the screenshot with your annotations and your voice become one precise prompt, pasted into your input and saved under Captured prompts.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle("Teach me (optional)", isOn: Binding(
+                    get: { state.teachEnabled },
+                    set: { state.setTeachEnabled($0) }
+                ))
+                .help("Select any text, then hold ⌥ and press T (or click Teach me in the menu bar popover): enprompt explains the text completely - like a five-year-old would understand, missing nothing - and speaks it aloud in a natural voice. Turn this off and the shortcut stays out of your way.")
+                Picker("Voice engine", selection: Binding(
+                    get: { state.teachEngine },
+                    set: { state.setTeachEngine($0) }
+                )) {
+                    ForEach(TeachVoiceEngine.allCases) { engine in
+                        Text(engine.displayName).tag(engine)
+                    }
+                }
+                .help("Neural uses Microsoft's free neural voices - the most natural, available for every language, no limits. Apple built-in always works offline, and Nepali then uses the free Piper voice (one-time download).")
+                Toggle("Show on screen while teaching", isOn: Binding(
+                    get: { state.teachOverlayEnabled },
+                    set: { state.setTeachOverlayEnabled($0) }
+                ))
+                .help("While the explanation is spoken, it floats over your screen with the word being spoken highlighted in orange, and a glow around the text being explained. It never blocks clicks - you can keep working - and Esc dismisses it.")
+                Picker("Language", selection: Binding(
+                    get: { state.teachLanguageID },
+                    set: { state.setTeachLanguage($0) }
+                )) {
+                    ForEach(SpeechKit.languages) { language in
+                        Text(language.label).tag(language.id)
+                    }
+                }
+                .help("The explanation is written and spoken in this language. Neural voices cover every language; Apple's built-in voices cover most, and Nepali falls back to the free Piper voice (one-time download).")
+                if state.teachEngine == .edge {
+                    edgeVoiceSection
+                } else if state.activeTeachLanguage.usesPiper {
+                    piperVoiceSection
+                } else {
+                    Picker("Voice", selection: Binding(
+                        get: { state.teachVoiceID },
+                        set: { state.setTeachVoice($0) }
+                    )) {
+                        Text("Auto - best voice").tag("")
+                        ForEach(SpeechKit.appleVoices(for: state.teachLanguageID), id: \.identifier) { voice in
+                            Text(voiceDisplayName(voice)).tag(voice.identifier)
+                        }
+                    }
+                    .help("The natural voice that speaks the explanation. 'Auto' picks the nicest one available (Siri-quality when macOS has it downloaded).")
+                    LabeledContent("Speaking speed") {
+                        Slider(value: Binding(
+                            get: { state.teachRate },
+                            set: { state.setTeachRate($0) }
+                        ), in: 0.30...0.55) {
+                            Text("Speaking speed")
+                        }
+                        .frame(width: 160)
+                    }
+                    .help("Slower sounds calmer and clearer for a young learner")
+                    Button("Preview voice") {
+                        Task { await state.previewTeachVoice() }
+                    }
+                    .disabled(!state.teachEnabled)
+                    .help("Plays one short sample sentence in this language and voice")
+                }
+                Text("Select any text anywhere, press the Teach me button (or hold ⌥ + T), and enprompt explains it like a five-year-old would understand - every sentence and every word, nothing left out - in \(state.activeTeachLanguage.label). The explanation comes from your LLM (works fully local with Ollama), and the voice is free with no limits: Microsoft's neural voices (most natural) or Apple's built-in voices (offline). The explanation is also copied to your clipboard.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Teach me & Voice")
             }
 
             Section {
@@ -506,6 +574,129 @@ struct SettingsView: View {
             if !isPreset && !isCustomMode {
                 isCustomMode = true
             }
+        }
+    }
+
+    /// The Edge neural voice status: a one-time free install of the tiny
+    /// edge-tts helper (~5 MB), then every language gets the most natural
+    /// voices - no account, no API key, no limits.
+    @ViewBuilder
+    private var edgeVoiceSection: some View {
+        if state.edgeInstalling {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Installing the free neural voices…")
+                    .font(.caption)
+            }
+        } else if SpeechKit.edgeInstalled {
+            HStack(spacing: 8) {
+                Label("Neural voice: \(edgeVoiceDisplayName(state.activeTeachLanguage))", systemImage: "checkmark.seal.fill")
+                    .font(.callout)
+                    .foregroundStyle(.green)
+                Spacer()
+                Button("Preview voice") {
+                    Task { await state.previewTeachVoice() }
+                }
+                .disabled(!state.teachEnabled)
+            }
+            LabeledContent("Speaking speed") {
+                Slider(value: Binding(
+                    get: { state.teachRate },
+                    set: { state.setTeachRate($0) }
+                ), in: 0.30...0.55) {
+                    Text("Speaking speed")
+                }
+                .frame(width: 160)
+            }
+            .help("Slower sounds calmer and clearer for a young learner")
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                Button {
+                    Task { await state.installEdgeVoices() }
+                } label: {
+                    Label("Install neural voices (free, ~5 MB)", systemImage: "arrow.down.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(state.edgeInstalling)
+                if let message = state.edgeError {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Text("Microsoft's free neural voices - the same premium quality behind Azure, no API key and no length limits. One tiny install (free, ~5 MB, no account), then every language sounds human: Hindi (Swara), Nepali (Hemkala), Chinese (Xiaoxiao), Hinglish and 17 more.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Human-friendly name for an Edge neural voice, e.g. "Swara (हिन्दी)".
+    private func edgeVoiceDisplayName(_ language: TeachLanguage) -> String {
+        let voice = SpeechKit.edgeVoice(for: language.id)
+        let name = voice.split(separator: "-").dropLast().joined(separator: " ")
+        return "\(name) (\(language.nativeName))"
+    }
+
+    /// The Piper (Nepali) voice install status: macOS ships no Nepali voice,
+    /// so enprompt downloads the free Piper neural model once (~100 MB total
+    /// engine + model), then Nepali works fully offline.
+    @ViewBuilder
+    private var piperVoiceSection: some View {
+        if let progress = state.piperInstallProgress {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Downloading the free Nepali voice…")
+                        .font(.caption)
+                    Spacer()
+                    Text("\(Int((progress * 100).rounded()))%")
+                        .font(.caption)
+                        .monospacedDigit()
+                }
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                Text("One-time download (~100 MB): the Piper engine + the Nepali neural voice. After this it works fully offline, free forever.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        } else if SpeechKit.piperInstalled {
+            HStack(spacing: 8) {
+                Label("Nepali voice installed - works offline", systemImage: "checkmark.seal.fill")
+                    .font(.callout)
+                    .foregroundStyle(.green)
+                Spacer()
+                Button("Preview voice") {
+                    Task { await state.previewTeachVoice() }
+                }
+                .disabled(!state.teachEnabled)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                Button {
+                    Task { await state.installPiperVoice() }
+                } label: {
+                    Label("Download Nepali voice (free, ~100 MB)", systemImage: "arrow.down.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                if let message = state.piperError {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Text("Apple doesn't ship a Nepali voice, so enprompt uses the free Piper neural voice (sherpa-onnx) instead. One-time download - after that, Nepali explanations are 100% local and offline.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Human-friendly voice name with its quality tier, e.g.
+    /// "Aarav (Siri)" for the premium Hindi voice.
+    private func voiceDisplayName(_ voice: AVSpeechSynthesisVoice) -> String {
+        switch voice.quality {
+        case .premium: return "\(voice.name) (Siri)"
+        case .enhanced: return "\(voice.name) (Enhanced)"
+        default: return "\(voice.name) (Standard)"
         }
     }
 

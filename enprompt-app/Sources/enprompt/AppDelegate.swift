@@ -101,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitor.onOptionDoubleTap = { gap in
             MainActor.assumeIsolated {
                 DebugLogger.log("OPTION DOUBLE-TAP (gap=\(String(format: "%.2f", gap))s) — enhancing focused text")
-                Task { await AppState.shared.enhanceFocusedText() }
+                AppState.shared.startEnhance()
             }
         }
         monitor.onOptionHoldStart = {
@@ -130,6 +130,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitor.onEscapeKey = {
             MainActor.assumeIsolated {
                 AppState.shared.handleVisualCaptureEscape()
+            }
+        }
+        monitor.onOptionT = {
+            MainActor.assumeIsolated {
+                AppState.shared.handleTeachShortcut()
             }
         }
 

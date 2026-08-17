@@ -7,7 +7,7 @@ import CopyButton from '../components/CopyButton'
 import { useRevealOnScroll } from '../hooks/useRevealOnScroll'
 
 const INSTALL_CMD =
-  'curl -L -o ~/Downloads/enprompt-1.9.16.dmg https://github.com/aadityakumarsah/enprompt/releases/download/v1.9.16/enprompt-1.9.16.dmg && open ~/Downloads/enprompt-1.9.16.dmg'
+  'curl -L -o ~/Downloads/enprompt-1.9.17.dmg https://github.com/aadityakumarsah/enprompt/releases/download/v1.9.17/enprompt-1.9.17.dmg && open ~/Downloads/enprompt-1.9.17.dmg'
 
 const FEATURES = [
   {
@@ -58,6 +58,18 @@ const FEATURES = [
         academic — select any text, and double-tap <span className="k">⌥</span>. enprompt rewrites it into a
         natural reply in that style, in your voice: no hashtag spam, no filler, no markdown, just the reply text
         ready to send.
+      </>
+    ),
+  },
+  {
+    icon: '🧒',
+    title: 'Teach me anything',
+    body: (
+      <>
+        Select any text and hold <span className="k">⌥</span>+<span className="k">T</span> — enprompt explains
+        it like you're five, in your language: 18 languages plus Hinglish, spoken aloud with free neural voices.
+        The explanation floats on screen with every spoken word highlighted and a glow around your selection,
+        and lands in your clipboard so you can reread it anytime.
       </>
     ),
   },
@@ -231,7 +243,7 @@ export default function Home() {
           {[0, 1].map((dup) => (
             <span key={dup}>
               <span>✦&nbsp; Expand</span><span>✦&nbsp; Dictate</span><span>✦&nbsp; Annotate</span>
-              <span>✦&nbsp; Undo</span><span>✦&nbsp; Presets</span><span>✦&nbsp; Private</span>
+              <span>✦&nbsp; Undo</span><span>✦&nbsp; Presets</span><span>✦&nbsp; Teach me</span>
               <span>✦&nbsp; Instant</span><span>✦&nbsp; Every app</span>
             </span>
           ))}

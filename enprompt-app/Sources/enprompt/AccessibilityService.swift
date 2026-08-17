@@ -186,6 +186,28 @@ enum AXService {
         return CGPoint(x: mouse.x, y: screen.frame.height - mouse.y)
     }
 
+    /// The screen frame (bottom-left origin) of the focused element, e.g. the
+    /// text the user has selected - used to draw the "we're explaining THIS"
+    /// glow box in the on-screen teach overlay. nil when unavailable.
+    static func focusedElementBounds() -> CGRect? {
+        guard isTrusted, let element = deepFocusedElement() else { return nil }
+        guard let positionValue = attribute(element, kAXPositionAttribute),
+              CFGetTypeID(positionValue) == AXValueGetTypeID(),
+              let sizeValue = attribute(element, kAXSizeAttribute),
+              CFGetTypeID(sizeValue) == AXValueGetTypeID() else { return nil }
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        let posValue = unsafeDowncast(positionValue, to: AXValue.self)
+        let sizeAxValue = unsafeDowncast(sizeValue, to: AXValue.self)
+        guard AXValueGetValue(posValue, .cgPoint, &position),
+              AXValueGetValue(sizeAxValue, .cgSize, &size),
+              size.width > 0, size.height > 0 else { return nil }
+        // AX coordinates are top-left origin; the overlay view is bottom-left.
+        guard let screen = NSScreen.main else { return nil }
+        let y = screen.frame.height - position.y - size.height
+        return CGRect(x: position.x, y: y, width: size.width, height: size.height)
+    }
+
     // MARK: - Text replacement
 
     /// A text selection inside an editable element.
