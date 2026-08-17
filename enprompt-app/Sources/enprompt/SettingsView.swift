@@ -305,16 +305,20 @@ struct SettingsView: View {
                         Button("Refresh models") {
                             Task { await state.loadOllamaModels() }
                         }
-                        if let status = state.ollamaPullStatus {
+                        if state.ollamaInstalling {
+                            Text("Installing…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if let status = state.ollamaPullStatus {
                             Text(status)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         } else if state.ollamaModelError != nil, state.ollamaModels.isEmpty {
-                            Text("Ollama isn't installed or isn't running")
+                            Text("Ollama isn't running yet")
                                 .font(.caption)
                                 .foregroundStyle(.orange)
                         } else if !state.ollamaModels.contains(where: LLMClient.isVisionModel) {
-                            Text("No vision-capable model yet - visual capture (⌥⌥⌥) needs one")
+                            Text("Install the models below to get started")
                                 .font(.caption)
                                 .foregroundStyle(.orange)
                         } else {
@@ -323,41 +327,94 @@ struct SettingsView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    if let error = state.ollamaModelError, state.ollamaModels.isEmpty, state.ollamaPullStatus == nil {
-                        // Fresh user, nothing installed: hold their hand
-                        // through the free setup - no terminal needed.
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Free local setup (no account, no money):")
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                            Text("1. Install Ollama (free app)  2. Start it  3. Pull a vision model  4. Save")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            HStack(spacing: 8) {
-                                Button("Install Ollama (free)") {
-                                    state.openOllamaDownload()
+                    if state.ollamaInstalling {
+                        // One-click install: both models download at the same
+                        // time - a single progress bar for the whole thing.
+                        VStack(alignment: .leading, spacing: 6) {
+                            ProgressView(value: state.ollamaInstallProgress)
+                                .progressViewStyle(.linear)
+                            HStack {
+                                Text("Installing llama3.2 (text) + qwen2.5vl (vision) at the same time… \(Int(state.ollamaInstallProgress * 100))%")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                if state.ollamaInstallProgress >= 1 {
+                                    Label("Done", systemImage: "checkmark.circle.fill")
+                                        .font(.caption)
+                                        .foregroundStyle(.green)
                                 }
-                                Button("Start Ollama") {
-                                    state.startOllamaApp()
+                            }
+                        }
+                    } else if state.ollamaModels.isEmpty, state.ollamaPullStatus == nil {
+                        // No models at all: first-time flow. The app checks
+                        // what's missing and installs everything with one click.
+                        if state.ollamaModelError != nil, !AppState.ollamaAppInstalled {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Free local setup - no account, no money, no terminal:")
+                                    .font(.caption)
+                                    .fontWeight(.semibold)
+                                Text("Step 1: install the free Ollama app. Step 2: come back and click Continue - enprompt starts it and downloads both models for you.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                HStack(spacing: 8) {
+                                    Button("Install Ollama (free)") {
+                                        state.openOllamaDownload()
+                                    }
+                                    Button("I've installed it - Continue") {
+                                        Task { await state.installOllamaModels() }
+                                    }
+                                    .buttonStyle(.borderedProminent)
                                 }
-                                Button("Retry") {
-                                    Task { await state.loadOllamaModels() }
+                            }
+                        } else {
+                            VStack(alignment: .leading, spacing: 8) {
+                                if state.ollamaModelError != nil {
+                                    Text("Ollama is installed but isn't running yet - one click fixes that and downloads the models:")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    Text("Nothing installed yet - one click downloads both models and sets them up:")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
                                 }
+                                Button {
+                                    Task { await state.installOllamaModels() }
+                                } label: {
+                                    Label("Install both models (llama3.2 + qwen2.5vl)", systemImage: "arrow.down.circle.fill")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                Text("Downloads the text model (~2 GB) and the vision model (~6 GB) at the same time, then picks them automatically.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
                             }
                         }
                     } else if state.ollamaPullStatus == nil,
                               !state.ollamaModels.contains(where: LLMClient.isVisionModel) {
-                        // Server is up but no vision model: one-click pull.
-                        HStack(spacing: 8) {
-                            Button("Pull qwen2.5vl:7b (vision, ~6 GB)") {
-                                Task { await state.pullOllamaModel("qwen2.5vl:7b") }
+                        // Server is up but no vision model yet: one-click
+                        // install of whatever's missing.
+                        VStack(alignment: .leading, spacing: 8) {
+                            Button {
+                                Task { await state.installOllamaModels() }
+                            } label: {
+                                Label("Install both models (llama3.2 + qwen2.5vl)", systemImage: "arrow.down.circle.fill")
                             }
-                            Button("Pull llama3.2 (text, ~2 GB)") {
-                                Task { await state.pullOllamaModel("llama3.2") }
-                            }
+                            .buttonStyle(.borderedProminent)
+                            Text("Downloads the text model (~2 GB) and the vision model (~6 GB) at the same time, then picks them automatically.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if state.ollamaPullStatus == nil {
+                        // Everything installed: ready to use.
+                        Label("Ready to use - llama3.2 (text) + qwen2.5vl (vision) are installed", systemImage: "checkmark.seal.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                        if let message = state.ollamaModelError {
+                            Text(message)
+                                .font(.caption)
+                                .foregroundStyle(.green)
                         }
                     }
-                    if let message = state.ollamaModelError, !state.ollamaModels.isEmpty, state.ollamaPullStatus == nil {
+                    if let message = state.ollamaModelError, state.ollamaModels.isEmpty, state.ollamaPullStatus == nil {
                         Text(message)
                             .font(.caption)
                             .foregroundStyle(.orange)

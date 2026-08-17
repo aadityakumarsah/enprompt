@@ -120,6 +120,8 @@ struct EnpromptMenuView: View {
                 EnhanceErrorCard(error: error, openSettings: { openSettings() })
             }
 
+            ollamaSetupBanner
+
             Text("Double-tap ⌥ enhances the focused text, hold ⌥ and speak for dictation, triple-tap ⌥ for the canvas: draw over the screen (pen, shapes, laser) while the mic listens live - press Esc to combine your drawing, the screenshot and your words into one prompt, pasted and saved under Captured prompts.\(state.isReplyPromptActive ? " With a reply prompt active: select a post, pick a style, paste with ⌘V." : "")")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -257,6 +259,9 @@ struct EnpromptMenuView: View {
         .onAppear {
             state.refreshTrust()
             Task { await state.checkForUpdates() }
+            if state.provider == .ollama {
+                Task { await state.loadOllamaModels() }
+            }
         }
     }
 
@@ -267,6 +272,76 @@ struct EnpromptMenuView: View {
                 .frame(width: 8, height: 8)
             Text(state.isAccessibilityTrusted ? "Accessible" : "Not trusted")
                 .font(.caption)
+        }
+    }
+
+    /// One-click free local setup, right in the popover: when the user runs
+    /// enprompt on the free Ollama provider but the models aren't installed
+    /// yet, this banner appears with a single Install button - the text model
+    /// and the vision model download at the same time with a live progress
+    /// bar, and enprompt picks them automatically when done.
+    @ViewBuilder
+    private var ollamaSetupBanner: some View {
+        if state.provider == .ollama, !state.ollamaInstalling,
+           (state.ollamaModels.isEmpty || !state.ollamaModels.contains(where: LLMClient.isVisionModel)) {
+            VStack(alignment: .leading, spacing: 6) {
+                Label("Free local models aren't installed yet", systemImage: "arrow.down.circle.fill")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.orange)
+                Text("One click downloads llama3.2 (text) + qwen2.5vl (vision) at the same time and sets them up - no terminal needed.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    Task { await state.installOllamaModels() }
+                } label: {
+                    Label("Install both models", systemImage: "arrow.down.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .help("Downloads the text model (~2 GB) and the vision model (~6 GB) at the same time, then selects them automatically")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.orange.opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .strokeBorder(Color.orange.opacity(0.25))
+                    )
+            )
+        } else if state.provider == .ollama, state.ollamaInstalling {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Installing llama3.2 + qwen2.5vl… \(Int(state.ollamaInstallProgress * 100))%")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                    Spacer()
+                    if state.ollamaInstallProgress >= 1 {
+                        Label("Done", systemImage: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                }
+                ProgressView(value: state.ollamaInstallProgress)
+                    .progressViewStyle(.linear)
+                Text("Both models are downloading at the same time - keep this open, enprompt sets them up when it finishes.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.orange.opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .strokeBorder(Color.orange.opacity(0.25))
+                    )
+            )
         }
     }
 }

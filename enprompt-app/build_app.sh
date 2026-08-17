@@ -49,7 +49,7 @@ STAGE_APP="$STAGE/enprompt.app"
 
 echo "==> Assembling $APP..."
 rm -rf "$APP" "$STAGE_APP"
-mkdir -p "$STAGE_APP/Contents/MacOS" "$STAGE_APP/Contents/Resources"
+mkdir -p "build" "$STAGE_APP/Contents/MacOS" "$STAGE_APP/Contents/Resources"
 cp .build/release/enprompt "$STAGE_APP/Contents/MacOS/enprompt"
 cp Resources/Info.plist "$STAGE_APP/Contents/Info.plist"
 cp Resources/icon.icns "$STAGE_APP/Contents/Resources/icon.icns"

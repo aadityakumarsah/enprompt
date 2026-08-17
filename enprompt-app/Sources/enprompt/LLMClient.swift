@@ -2755,21 +2755,109 @@ Not:
         try checkHTTP(response: response, data: Data())
     }
 
-    /// Pulls a model via Ollama's HTTP API (POST /api/pull) - no shelling out
-    /// to the `ollama` CLI, which GUI apps can't rely on being on PATH.
-    /// Completes when the download finishes; a 6 GB vision model can take
-    /// several minutes, so this uses a dedicated, much longer timeout.
-    static func pullOllamaModel(_ name: String, baseURL: String) async throws {
+    /// Pulls a model via Ollama's HTTP API (POST /api/pull, streamed) - no
+    /// shelling out to the `ollama` CLI, which GUI apps can't rely on being on
+    /// PATH. Reports download progress (0...1) as streamed lines arrive; a
+    /// 6 GB vision model can take several minutes, so this uses a dedicated,
+    /// much longer timeout.
+    static func pullOllamaModel(
+        _ name: String,
+        baseURL: String,
+        progress: ((Double) -> Void)? = nil
+    ) async throws {
         let host = baseURL.hasSuffix("/v1") ? String(baseURL.dropLast(3)) : baseURL
         var request = URLRequest(url: URL(string: "\(host)/api/pull")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["name": name, "stream": false])
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["name": name, "stream": true])
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 3600
         config.timeoutIntervalForResource = 3600
-        let (data, response) = try await URLSession(configuration: config).data(for: request)
-        try checkHTTP(response: response, data: data)
+        let (bytes, response) = try await URLSession(configuration: config).bytes(for: request)
+        try checkHTTP(response: response, data: Data())
+        // Streamed NDJSON lines carry per-layer byte counts: sum them so the
+        // progress bar climbs smoothly through the whole download.
+        var layerCompleted: [String: Int64] = [:]
+        var layerTotal: [String: Int64] = [:]
+        for try await line in bytes.lines {
+            guard let data = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            if let digest = json["digest"] as? String,
+               let completed = json["completed"] as? Int64,
+               let total = json["total"] as? Int64, total > 0 {
+                layerCompleted[digest] = completed
+                layerTotal[digest] = total
+                let done = layerCompleted.values.reduce(0, +)
+                let all = layerTotal.values.reduce(0, +)
+                progress?(min(max(Double(done) / Double(all), 0), 1))
+            }
+        }
+    }
+
+    /// Downloads several models through the local Ollama server at the same
+    /// time and reports ONE combined progress (0...1), so a first-time user
+    /// can install the text model and the vision model with a single click.
+    /// Each model is pulled concurrently; the reported fraction is the
+    /// byte-weighted average of the individual downloads.
+    static func pullOllamaModels(
+        _ names: [String],
+        baseURL: String,
+        progress: @escaping (Double) -> Void
+    ) async throws {
+        guard !names.isEmpty else { return }
+        if names.count == 1 {
+            try await pullOllamaModel(names[0], baseURL: baseURL, progress: progress)
+            return
+        }
+        let host = baseURL.hasSuffix("/v1") ? String(baseURL.dropLast(3)) : baseURL
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 3600
+        config.timeoutIntervalForResource = 3600
+        let session = URLSession(configuration: config)
+
+        /// Thread-safe accumulator for concurrent pull progress.
+        final class CombinedProgress: @unchecked Sendable {
+            private let lock = NSLock()
+            private let onProgress: (Double) -> Void
+            private var totals: [String: Int64] = [:]
+            private var done: [String: Int64] = [:]
+            init(onProgress: @escaping (Double) -> Void) {
+                self.onProgress = onProgress
+            }
+            func report(_ digest: String, completed: Int64, total: Int64) {
+                lock.lock()
+                totals[digest] = total
+                done[digest] = max(done[digest] ?? 0, completed)
+                let sumDone = done.values.reduce(0, +)
+                let sumTotal = totals.values.reduce(0, +)
+                lock.unlock()
+                guard sumTotal > 0 else { return }
+                onProgress(min(max(Double(sumDone) / Double(sumTotal), 0), 1))
+            }
+        }
+        let combined = CombinedProgress(onProgress: progress)
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for name in names {
+                group.addTask {
+                    var request = URLRequest(url: URL(string: "\(host)/api/pull")!)
+                    request.httpMethod = "POST"
+                    request.setValue("application/json", forHTTPHeaderField: "content-type")
+                    request.httpBody = try JSONSerialization.data(withJSONObject: ["name": name, "stream": true])
+                    let (bytes, response) = try await session.bytes(for: request)
+                    try Self.checkHTTP(response: response, data: Data())
+                    for try await line in bytes.lines {
+                        guard let data = line.data(using: .utf8),
+                              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                              let digest = json["digest"] as? String,
+                              let completed = json["completed"] as? Int64,
+                              let total = json["total"] as? Int64, total > 0 else { continue }
+                        combined.report(digest, completed: completed, total: total)
+                    }
+                }
+            }
+            try await group.waitForAll()
+        }
     }
 
     /// Rough token estimate (OpenAI-style heuristic: ~4 characters per token).

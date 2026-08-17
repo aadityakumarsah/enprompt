@@ -102,6 +102,10 @@ final class AppState: ObservableObject {
     @Published var ollamaModelError: String?
     /// Non-nil while a model download is in progress (shown in Settings).
     @Published var ollamaPullStatus: String?
+    /// True while the one-click setup downloads the text + vision models.
+    @Published var ollamaInstalling = false
+    /// Combined download progress of the one-click setup (0...1).
+    @Published var ollamaInstallProgress: Double = 0
 
     /// A newer enprompt release exists on GitHub - shown as a banner in the
     /// popover with a one-click download (DMG + Finder, no notarization).
@@ -376,7 +380,11 @@ final class AppState: ObservableObject {
         ollamaModelError = nil
         DebugLogger.log("OLLAMA: pulling \(name)")
         do {
-            try await LLMClient.pullOllamaModel(name, baseURL: baseURL)
+            try await LLMClient.pullOllamaModel(name, baseURL: baseURL) { [weak self] progress in
+                Task { @MainActor in
+                    self?.ollamaPullStatus = "Downloading \(name)… \(Int((progress * 100).rounded()))%"
+                }
+            }
             ollamaPullStatus = nil
             await loadOllamaModels()
             ollamaModelError = "\(name) is installed and ready to use"
@@ -386,6 +394,107 @@ final class AppState: ObservableObject {
             ollamaModelError = "Download failed - check your internet connection and try again"
             DebugLogger.log("OLLAMA: pull \(name) failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Whether the Ollama app (or its CLI / data directory) exists on this
+    /// Mac - used to show the right first step in Settings: install the app,
+    /// start it, or just download the models.
+    static var ollamaAppInstalled: Bool {
+        let fileManager = FileManager.default
+        let candidates = [
+            "/Applications/Ollama.app",
+            "/opt/homebrew/bin/ollama",
+            "/usr/local/bin/ollama",
+            "\(NSHomeDirectory())/.ollama",
+        ]
+        return candidates.contains { fileManager.fileExists(atPath: $0) }
+    }
+
+    /// One-click free setup: makes sure the Ollama server is running (starting
+    /// the app if it is installed), then downloads the normal text model and
+    /// the vision model AT THE SAME TIME with a live 0–100% progress bar, and
+    /// finally picks them so everything just works - no terminal, no juggling.
+    /// A brand-new user only ever clicks Install / Continue.
+    func installOllamaModels() async {
+        guard !ollamaInstalling else { return }
+        ollamaInstalling = true
+        ollamaInstallProgress = 0
+        ollamaModelError = nil
+        defer {
+            ollamaInstalling = false
+            ollamaInstallProgress = 0
+        }
+        let enhanceModel = LLMProvider.ollama.defaultModel      // llama3.2
+        let visionModelName = "qwen2.5vl:7b"                     // vision
+
+        // 0. Commit the Ollama provider up-front, so Enhance works the moment
+        //    the download finishes - the user never has to press Save.
+        provider = .ollama
+        apiKey = "ollama"
+        baseURL = LLMProvider.ollama.defaultBaseURL
+        persistConfig()
+
+        // 1. The server must answer: launch the app if it's installed, then
+        //    wait for it to come up (a fresh launch takes a few seconds).
+        var serverUp = await ollamaServerReachable()
+        if !serverUp, Self.ollamaAppInstalled {
+            startOllamaApp()
+            for _ in 0..<30 where !serverUp {
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                serverUp = await ollamaServerReachable()
+            }
+        }
+        guard serverUp else {
+            ollamaModelError = Self.ollamaAppInstalled
+                ? "Ollama isn't running - open the Ollama app once, then click Continue."
+                : "Ollama isn't installed yet - install the free app first, then click Continue."
+            return
+        }
+
+        // 2. Skip anything that is already installed.
+        var missing = [enhanceModel, visionModelName]
+        if let installed = try? await LLMClient.fetchOllamaModels(baseURL: baseURL) {
+            missing = missing.filter { !installed.contains($0) }
+        }
+
+        // 3. Everything present: just select the models and we're done.
+        guard !missing.isEmpty else {
+            await selectLocalDefaults(enhanceModel, visionModelName)
+            ollamaModelError = "llama3.2 + qwen2.5vl:7b are ready to use"
+            DebugLogger.log("OLLAMA: setup complete - both models already installed")
+            return
+        }
+
+        // 4. Download the missing models together, showing one progress bar.
+        DebugLogger.log("OLLAMA: one-click setup pulling \(missing.joined(separator: ", "))")
+        do {
+            try await LLMClient.pullOllamaModels(missing, baseURL: baseURL) { [weak self] progress in
+                Task { @MainActor in
+                    self?.ollamaInstallProgress = progress
+                }
+            }
+            ollamaInstallProgress = 1
+            await loadOllamaModels()
+            await selectLocalDefaults(enhanceModel, visionModelName)
+            DebugLogger.log("OLLAMA: setup complete - installed \(missing.joined(separator: ", "))")
+        } catch {
+            ollamaModelError = "Download failed - check your internet connection and try again"
+            DebugLogger.log("OLLAMA: setup failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Selects the local text + vision models and saves the config, so the
+    /// user is ready the moment the download finishes.
+    func selectLocalDefaults(_ enhanceModel: String, _ visionModelName: String) async {
+        model = enhanceModel
+        visionModel = visionModelName
+        persistConfig()
+        await loadOllamaModels()
+    }
+
+    /// Quick reachability probe for the local Ollama server.
+    private func ollamaServerReachable() async -> Bool {
+        (try? await LLMClient.fetchOllamaModels(baseURL: baseURL)) != nil
     }
 
     /// Opens the free Ollama download page - the first step for a new user
