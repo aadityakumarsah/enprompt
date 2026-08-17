@@ -44,6 +44,10 @@ final class AppState: ObservableObject {
     @Published var enhancePhase: EnhancePhase = .idle
     @Published var testStatus: EnhanceStatus?
 
+    /// Transient confirmation after saving a system prompt preset, e.g.
+    /// "Saved — X.com (Twitter) reply is now the active prompt".
+    @Published var promptSavedMessage: String? = nil
+
     /// Push-to-talk dictation: hold Option to speak, release to insert.
     @Published var isListening = false
     private let transcriber = SpeechTranscriber()
@@ -159,6 +163,36 @@ final class AppState: ObservableObject {
         defaults.set(systemPrompt, forKey: "systemPrompt")
         if !apiKey.isEmpty {
             KeychainStore.save(apiKey)
+        }
+    }
+
+    /// The name of the preset matching the current system prompt, nil when
+    /// the prompt is custom.
+    var activePresetName: String? {
+        if systemPrompt == LLMClient.defaultSystemPrompt {
+            return "Polished rewrite (default)"
+        }
+        for (name, prompt) in LLMClient.promptPresets where prompt == systemPrompt {
+            return name
+        }
+        return nil
+    }
+
+    /// Saves the system prompt and briefly confirms it, e.g.
+    /// "Saved — X.com (Twitter) reply is now the active prompt".
+    func saveSystemPrompt() {
+        persistConfig()
+        let name = activePresetName ?? "Custom"
+        let message = "Saved — \(name) is now the active prompt"
+        promptSavedMessage = message
+        DebugLogger.log("SYSTEM PROMPT SAVED: \(name)")
+        Task {
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            await MainActor.run {
+                if self.promptSavedMessage == message {
+                    self.promptSavedMessage = nil
+                }
+            }
         }
     }
 
@@ -420,6 +454,13 @@ final class AppState: ObservableObject {
             try? await Task.sleep(nanoseconds: 300_000_000)
         }
         guard let input else {
+            // Fallback: the user selected text OUTSIDE any editable field
+            // (a tweet, a post, an article). Enhance that selection and put
+            // the result on the clipboard so it can be pasted anywhere.
+            if let selection = AXService.focusedSelection(), !selection.isEmpty {
+                await enhanceToClipboard(selection)
+                return
+            }
             enhancePhase = .error("No editable text field is focused")
             DebugLogger.log("ENHANCE SKIPPED: no focused editable input after retries — \(AXService.focusedElementDebugInfo())")
             return
@@ -609,6 +650,124 @@ final class AppState: ObservableObject {
             enhancePhase = .error((error as? LLMError)?.userFacingMessage ?? "Something went wrong while enhancing. Please try again.")
             NSSound(named: "Sosumi")?.play()
             DebugLogger.log("ENHANCE FAILED: \(error.localizedDescription)")
+        }
+    }
+
+    /// Enhances arbitrary selected text (read-only selections included) and
+    /// writes the result to the clipboard. Used when no editable field is
+    /// focused and by the Prepare-reply flow.
+    private func enhanceToClipboard(_ text: String) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            enhancePhase = .error("No input text found")
+            return
+        }
+        isEnhancing = true
+        enhancePhase = .enhancing(0)
+        NSSound(named: "Tink")?.play()
+        defer { isEnhancing = false }
+
+        let startedAt = Date()
+        do {
+            DebugLogger.log("ENHANCING \(trimmed.count) chars (selection -> clipboard) via \(config.provider.rawValue)/\(config.model)")
+            let enhanced = try await LLMClient.enhance(
+                trimmed,
+                config: config,
+                systemPrompt: systemPrompt
+            ) { [weak self] progress in
+                Task { @MainActor in
+                    self?.enhancePhase = .enhancing(progress)
+                }
+            }
+            guard !enhanced.isEmpty else { throw LLMError.emptyResponse }
+            recordUsage(promptText: systemPrompt + "\n" + trimmed, completionText: enhanced)
+            let elapsed = String(format: "%.1f", Date().timeIntervalSince(startedAt))
+
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(enhanced, forType: .string)
+            enhancePhase = .success("\(trimmed.count) → \(enhanced.count) chars — copied to clipboard (\(elapsed)s), press ⌘V to paste")
+            NSSound(named: "Glass")?.play()
+            DebugLogger.log("ENHANCED \(trimmed.count) -> \(enhanced.count) chars to clipboard in \(elapsed)s")
+        } catch {
+            enhancePhase = .error((error as? LLMError)?.userFacingMessage ?? "Something went wrong. Please try again.")
+            NSSound(named: "Sosumi")?.play()
+            DebugLogger.log("ENHANCE FAILED: \(error.localizedDescription)")
+        }
+    }
+
+    /// Prepares a reply to the currently selected text using the chosen reply
+    /// preset as the system prompt, then copies the reply to the clipboard.
+    /// Works on read-only selections (a tweet/post), no editable field needed.
+    func prepareReply(preset: String?) async {
+        guard !isEnhancing else {
+            DebugLogger.log("REPLY SKIPPED: already enhancing")
+            return
+        }
+        let systemPromptForReply: String
+        if let preset {
+            guard let prompt = LLMClient.promptPresets[preset] else {
+                enhancePhase = .error("Preset '\(preset)' not found")
+                return
+            }
+            systemPromptForReply = prompt
+        } else {
+            systemPromptForReply = systemPrompt
+        }
+        guard !systemPromptForReply.isEmpty else {
+            enhancePhase = .error("No system prompt set — pick a reply preset in Settings → System Prompt")
+            return
+        }
+
+        // 1. The selection anywhere (editable or read-only).
+        var source = AXService.focusedSelection()
+        if source == nil || source!.isEmpty {
+            // 2. Fall back to the focused editable field's text.
+            source = AXService.focusedTextInput()?.text
+        }
+        guard let text = source?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else {
+            enhancePhase = .error("Select the post text first, then press Prepare reply")
+            DebugLogger.log("REPLY SKIPPED: no selection — \(AXService.focusedElementDebugInfo())")
+            return
+        }
+
+        DebugLogger.log("REPLY preparing \(text.count) chars with preset '\(preset ?? "custom")'")
+        await enhanceToClipboard(text, systemPromptOverride: systemPromptForReply)
+    }
+
+    private func enhanceToClipboard(_ text: String, systemPromptOverride: String) async {
+        isEnhancing = true
+        enhancePhase = .enhancing(0)
+        NSSound(named: "Tink")?.play()
+        defer { isEnhancing = false }
+
+        let startedAt = Date()
+        do {
+            DebugLogger.log("ENHANCING \(text.count) chars (reply -> clipboard) via \(config.provider.rawValue)/\(config.model)")
+            let enhanced = try await LLMClient.enhance(
+                text,
+                config: config,
+                systemPrompt: systemPromptOverride
+            ) { [weak self] progress in
+                Task { @MainActor in
+                    self?.enhancePhase = .enhancing(progress)
+                }
+            }
+            guard !enhanced.isEmpty else { throw LLMError.emptyResponse }
+            recordUsage(promptText: systemPromptOverride + "\n" + text, completionText: enhanced)
+            let elapsed = String(format: "%.1f", Date().timeIntervalSince(startedAt))
+
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(enhanced, forType: .string)
+            enhancePhase = .success("Reply ready — copied to clipboard (\(elapsed)s), press ⌘V in the post box")
+            NSSound(named: "Glass")?.play()
+            DebugLogger.log("REPLY READY: \(text.count) -> \(enhanced.count) chars on clipboard in \(elapsed)s")
+        } catch {
+            enhancePhase = .error((error as? LLMError)?.userFacingMessage ?? "Something went wrong. Please try again.")
+            NSSound(named: "Sosumi")?.play()
+            DebugLogger.log("REPLY FAILED: \(error.localizedDescription)")
         }
     }
 

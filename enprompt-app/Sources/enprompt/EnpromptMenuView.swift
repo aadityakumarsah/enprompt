@@ -64,35 +64,58 @@ struct EnpromptMenuView: View {
             }
             .frame(maxWidth: .infinity)
 
-            Button {
-                Task { await state.enhanceFocusedText() }
-            } label: {
-                Label("Enhance focused text", systemImage: "wand.and.stars")
-                    .font(.callout)
+            HStack(spacing: 8) {
+                Menu {
+                    Button("X.com (Twitter) reply") {
+                        Task { await state.prepareReply(preset: "X.com (Twitter) reply") }
+                    }
+                    Button("Email reply") {
+                        Task { await state.prepareReply(preset: "Email reply") }
+                    }
+                    Button("Founder reply") {
+                        Task { await state.prepareReply(preset: "Founder reply") }
+                    }
+                    Divider()
+                    Button("Custom prompt (saved)") {
+                        Task { await state.prepareReply(preset: nil) }
+                    }
+                } label: {
+                    Label("Prepare reply", systemImage: "paperplane.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(state.isEnhancing)
+                .help("Select any post text, pick a reply style, and the reply lands on your clipboard - ⌘V to paste")
+
+                if let active = state.activePresetName {
+                    Text(active)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .disabled(state.isEnhancing)
-            .help("Runs the same enhancement as a ⌥⌥ double-tap - handy when the gesture misses")
 
             if state.isEnhancing {
                 HStack(spacing: 6) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("Enhancing text via LLM...")
+                    Text("Preparing via LLM...")
                         .font(.caption)
                 }
             } else if case .success(let message) = state.enhancePhase {
                 Label(message, systemImage: "checkmark.circle.fill")
                     .font(.caption)
                     .foregroundStyle(.green)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if case .error(let message) = state.enhancePhase {
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            Text("Double-tap ⌥ to expand text, hold ⌥ and speak for dictation, triple-tap ⌥ for the canvas: draw over the screen (pen, shapes, laser) while the mic listens live - press Esc to combine your drawing, the screenshot and your words into one prompt, pasted and saved under Captured prompts.")
+            Text("Prepare reply: select a post, pick a style, paste with ⌘V. Double-tap ⌥ enhances the focused field, hold ⌥ and speak for dictation, triple-tap ⌥ for the canvas: draw over the screen (pen, shapes, laser) while the mic listens live - press Esc to combine your drawing, the screenshot and your words into one prompt, pasted and saved under Captured prompts.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

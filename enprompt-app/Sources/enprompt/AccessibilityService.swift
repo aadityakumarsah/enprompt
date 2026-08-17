@@ -104,6 +104,54 @@ enum AXService {
         return FocusedInput(element: element, appElement: app, appPID: pid, role: role, text: text, appName: appName)
     }
 
+    /// Returns the currently selected text ANYWHERE - editable fields or
+    /// read-only content (a tweet, an article). Checks the focused element
+    /// and each ancestor for a selected-text attribute, which is how Safari
+    /// and Chrome expose page selections.
+    static func focusedSelection() -> String? {
+        guard isTrusted else { return nil }
+        guard let element = deepFocusedElement() else { return nil }
+        var current: AXUIElement? = element
+        var depth = 0
+        while let el = current, depth < 12 {
+            if let text = attribute(el, kAXSelectedTextAttribute) as? String,
+               !text.isEmpty {
+                return text
+            }
+            current = attributeElement(el, kAXParentAttribute)
+            depth += 1
+        }
+        return nil
+    }
+
+    private static func deepFocusedElement() -> AXUIElement? {
+        let system = AXUIElementCreateSystemWide()
+        if let element = attributeElement(system, kAXFocusedUIElementAttribute) {
+            return element
+        }
+        if let app = attributeElement(system, kAXFocusedApplicationAttribute) {
+            if let window = attributeElement(app, kAXFocusedWindowAttribute),
+               let el = attributeElement(window, kAXFocusedUIElementAttribute) {
+                return el
+            }
+            if let el = attributeElement(app, kAXFocusedUIElementAttribute) {
+                return el
+            }
+        }
+        if let wsApp = NSWorkspace.shared.frontmostApplication,
+           wsApp.processIdentifier != getpid() {
+            let app = AXUIElementCreateApplication(wsApp.processIdentifier)
+            if let window = attributeElement(app, kAXFocusedWindowAttribute),
+               let el = attributeElement(window, kAXFocusedUIElementAttribute) {
+                return el
+            }
+            if let el = attributeElement(app, kAXFocusedUIElementAttribute) {
+                return el
+            }
+        }
+        return nil
+    }
+
     // MARK: - Text replacement
 
     /// A text selection inside an editable element.

@@ -41,9 +41,11 @@ struct SettingsView: View {
                 if selection == "default" {
                     isCustomMode = false
                     state.systemPrompt = LLMClient.defaultSystemPrompt
+                    state.saveSystemPrompt()
                 } else if let prompt = LLMClient.promptPresets[selection] {
                     isCustomMode = false
                     state.systemPrompt = prompt
+                    state.saveSystemPrompt()
                 } else {
                     isCustomMode = true
                 }
@@ -395,9 +397,14 @@ struct SettingsView: View {
                         state.systemPrompt = ""
                     }
                     Button("Save") {
-                        state.persistConfig()
+                        state.saveSystemPrompt()
                     }
                     .buttonStyle(.borderedProminent)
+                }
+                if let message = state.promptSavedMessage {
+                    Label(message, systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
                 }
                 if systemPromptSelection.wrappedValue == "custom" {
                     Text("Custom mode is active: this exact prompt is sent to the model with every enhancement. Edit it above and hit Save - no preset needed.")
