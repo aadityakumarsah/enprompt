@@ -327,13 +327,18 @@ final class AppState: ObservableObject {
     }
 
     /// Asks for mic + speech up-front at launch so dictation and the canvas
-    /// never have to prompt in the middle of a flow.
+    /// never have to prompt in the middle of a flow. Also triggers the
+    /// Screen Recording prompt: using ScreenCaptureKit makes macOS show the
+    /// one-click Allow dialog automatically - no System Settings needed.
     func requestPrivacyPermissions() {
         if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
             AVCaptureDevice.requestAccess(for: .audio) { _ in }
         }
         if SFSpeechRecognizer.authorizationStatus() == .notDetermined {
             SFSpeechRecognizer.requestAuthorization { _ in }
+        }
+        if !ScreenCapture.isAuthorized {
+            Task { await ScreenCapture.requestPermission() }
         }
     }
 
@@ -927,8 +932,8 @@ final class AppState: ObservableObject {
         guard !isListening, !isEnhancing else { return }
 
         if !ScreenCapture.isAuthorized {
-            ScreenCapture.requestPermission()
-            enhancePhase = .error("Screen Recording permission needed - allow it in Settings → Setup (enprompt restarts itself)")
+            Task { await ScreenCapture.requestPermission() }
+            enhancePhase = .error("Screen Recording permission needed - click Allow in the system prompt (enprompt restarts itself)")
             DebugLogger.log("VISUAL CAPTURE: no screen recording permission")
             return
         }
@@ -979,12 +984,12 @@ final class AppState: ObservableObject {
             // tokens roughly in half vs. 700px - faster to process, and the
             // model answers sooner.
             guard
-                let jpeg = ScreenCapture.captureFullScreenJPEG(maxDimension: 640, quality: 0.45),
+                let jpeg = await ScreenCapture.captureFullScreenJPEG(maxDimension: 640, quality: 0.45),
                 let image = CGImageSourceCreateWithData(jpeg as CFData, nil).flatMap({
                     CGImageSourceCreateImageAtIndex($0, 0, nil)
                 })
             else {
-                enhancePhase = .error("Screen capture failed - allow Screen Recording in Settings → Setup")
+                enhancePhase = .error("Screen capture failed - click Allow in the Screen Recording prompt and try again")
                 DebugLogger.log("VISUAL CAPTURE: capture returned nil")
                 return
             }

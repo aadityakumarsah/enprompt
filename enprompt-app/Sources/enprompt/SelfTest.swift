@@ -97,8 +97,14 @@ enum SelfTest {
 
         // 3. Vision: request screen recording permission, capture a region,
         //    and check the PNG round-trips.
-        if ScreenCapture.isAuthorized || { ScreenCapture.requestPermission(); usleep(300_000); return ScreenCapture.isAuthorized }() {
-            if let png = ScreenCapture.capturePNG(rect: CGRect(x: 0, y: 0, width: 400, height: 300), maxDimension: 800) {
+        var screenRecording = ScreenCapture.isAuthorized
+        if !screenRecording {
+            await ScreenCapture.requestPermission()
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            screenRecording = ScreenCapture.isAuthorized
+        }
+        if screenRecording {
+            if let png = await ScreenCapture.capturePNG(rect: CGRect(x: 0, y: 0, width: 400, height: 300), maxDimension: 800) {
                 let sig = png.prefix(8)
                 let isPNG = sig.count == 8 && sig[0] == 0x89 && sig[1] == 0x50
                 check("screen capture", isPNG, "png \(png.count) bytes")
@@ -125,7 +131,7 @@ enum SelfTest {
             do {
                 let prompt = try await LLMClient.promptWithVision(
                     instruction: "Move the button to the top right corner",
-                    imageData: ScreenCapture.capturePNG(rect: CGRect(x: 0, y: 0, width: 400, height: 300), maxDimension: 800) ?? Data(),
+                    imageData: await ScreenCapture.capturePNG(rect: CGRect(x: 0, y: 0, width: 400, height: 300), maxDimension: 800) ?? Data(),
                     config: config
                 )
                 check("vision prompt", !prompt.isEmpty && prompt.count > 10, prompt.prefix(120).description)

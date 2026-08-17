@@ -115,7 +115,7 @@ struct SettingsView: View {
                     title: "Screen Recording",
                     granted: state.screenRecordingGranted,
                     pane: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
-                    detail: "Needed for the drawing canvas - enprompt restarts itself after you allow it"
+                    detail: "Needed for the drawing canvas - a one-click Allow prompt appears on first launch; enprompt restarts itself after you allow it"
                 )
                 permissionRow(
                     title: "Microphone",

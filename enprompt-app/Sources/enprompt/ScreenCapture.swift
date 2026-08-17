@@ -1,34 +1,44 @@
 import AppKit
 import CoreGraphics
+import ScreenCaptureKit
 
 /// Captures a circled region of the screen as a PNG. Requires Screen
-/// Recording permission (prompted automatically on first use).
+/// Recording permission.
+///
+/// Uses ScreenCaptureKit (macOS 14+): macOS only shows the automatic one-click
+/// "Allow" screen-recording prompt when an app uses SCK - the legacy
+/// CGWindowListCreateImage API never prompts and forces users to add the app
+/// manually via System Settings → Privacy → Screen Recording (+ button).
 enum ScreenCapture {
 
     /// True when enprompt may capture the screen.
     static var isAuthorized: Bool { CGPreflightScreenCaptureAccess() }
 
-    /// Prompts for Screen Recording permission (macOS shows a system dialog;
-    /// the app must be restarted after granting for it to take effect).
-    static func requestPermission() {
-        if !isAuthorized {
-            CGRequestScreenCaptureAccess()
-        }
+    /// Triggers the macOS screen-recording permission prompt. While
+    /// unauthorized, attempting to enumerate shareable content via
+    /// ScreenCaptureKit makes the system show the standard "enprompt would
+    /// like to record this Mac's screen" alert - one click on Allow, no
+    /// System Settings needed.
+    static func requestPermission() async {
+        guard !isAuthorized else { return }
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
+              let display = content.displays.first else { return }
+        // A minimal capture attempt guarantees the prompt is shown (the
+        // enumeration alone can be enough, but this is deterministic).
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        let config = SCStreamConfiguration()
+        config.width = 1
+        config.height = 1
+        _ = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
     }
 
     /// Captures `rect` (in CG coordinates: top-left origin, points) and
     /// returns PNG data, downscaled so very large regions stay reasonably
     /// small for the vision API. nil when capture fails or permission is off.
-    static func capturePNG(rect: CGRect, maxDimension: CGFloat = 1600) -> Data? {
+    static func capturePNG(rect: CGRect, maxDimension: CGFloat = 1600) async -> Data? {
         guard isAuthorized else { return nil }
         guard rect.width > 0, rect.height > 0 else { return nil }
-
-        guard let image = CGWindowListCreateImage(
-            rect,
-            .optionOnScreenOnly,
-            kCGNullWindowID,
-            [.bestResolution, .boundsIgnoreFraming]
-        ) else { return nil }
+        guard let image = await displayImage(croppedTo: rect) else { return nil }
 
         var finalImage = image
         let longest = max(image.width, image.height)
@@ -46,16 +56,11 @@ enum ScreenCapture {
 
     /// Captures the whole main screen as JPEG (much smaller than PNG - faster
     /// uploads and vision processing).
-    static func captureFullScreenJPEG(maxDimension: CGFloat = 1280, quality: CGFloat = 0.8) -> Data? {
+    static func captureFullScreenJPEG(maxDimension: CGFloat = 1280, quality: CGFloat = 0.8) async -> Data? {
         guard isAuthorized else { return nil }
         guard let screen = NSScreen.main else { return nil }
         let cgRect = cgRect(for: screen)
-        guard let image = CGWindowListCreateImage(
-            cgRect,
-            .optionOnScreenOnly,
-            kCGNullWindowID,
-            [.bestResolution, .boundsIgnoreFraming]
-        ) else { return nil }
+        guard let image = await displayImage(croppedTo: cgRect) else { return nil }
 
         var finalImage = image
         let longest = max(image.width, image.height)
@@ -72,10 +77,47 @@ enum ScreenCapture {
     }
 
     /// Captures the whole main screen and returns PNG data (downscaled).
-    static func captureFullScreenPNG(maxDimension: CGFloat = 1600) -> Data? {
+    static func captureFullScreenPNG(maxDimension: CGFloat = 1600) async -> Data? {
         guard isAuthorized else { return nil }
         guard let screen = NSScreen.main else { return nil }
-        return capturePNG(rect: cgRect(for: screen), maxDimension: maxDimension)
+        return await capturePNG(rect: cgRect(for: screen), maxDimension: maxDimension)
+    }
+
+    /// Captures the display containing `rect` via ScreenCaptureKit and crops
+    /// the image down to `rect` (CG coordinates: top-left origin, points).
+    private static func displayImage(croppedTo rect: CGRect) async -> CGImage? {
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else {
+            return nil
+        }
+        let screen = NSScreen.screens.first { screen in
+            let frame = cgRect(for: screen)
+            return frame.contains(rect.origin) && frame.contains(CGPoint(x: rect.maxX, y: rect.maxY))
+        } ?? NSScreen.main
+        guard let screen else { return nil }
+
+        let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        let display = content.displays.first { $0.displayID == screenID?.uint32Value }
+            ?? content.displays.first
+        guard let display else { return nil }
+
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+        // Default configuration captures the display at its native resolution.
+        let config = SCStreamConfiguration()
+        guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) else {
+            return nil
+        }
+
+        // Crop: rect is in CG points (top-left origin); the capture is in
+        // pixels on the display, so scale by the image's pixel density.
+        let scale = CGFloat(image.width) / display.frame.width
+        let origin = display.frame.origin
+        let crop = CGRect(
+            x: (rect.minX - origin.x) * scale,
+            y: (rect.minY - origin.y) * scale,
+            width: rect.width * scale,
+            height: rect.height * scale
+        )
+        return image.cropping(to: crop.intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height)))
     }
 
     /// Draws the user's canvas annotations (strokes in view coordinates with
@@ -152,9 +194,7 @@ enum ScreenCapture {
     }
 
     /// Converts an AppKit screen frame (bottom-left origin, global point
-    /// space) into CGWindowListCreateImage coordinates (top-left origin on the
-    /// primary display). Without this, screens positioned away from the origin
-    /// would capture the wrong region.
+    /// space) into CG coordinates (top-left origin on the primary display).
     private static func cgRect(for screen: NSScreen) -> CGRect {
         let frame = screen.frame
         let primaryHeight = NSScreen.screens.first { $0.frame.origin == .zero }?.frame.height ?? frame.height
