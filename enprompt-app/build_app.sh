@@ -53,6 +53,7 @@ mkdir -p "$STAGE_APP/Contents/MacOS" "$STAGE_APP/Contents/Resources"
 cp .build/release/enprompt "$STAGE_APP/Contents/MacOS/enprompt"
 cp Resources/Info.plist "$STAGE_APP/Contents/Info.plist"
 cp Resources/icon.icns "$STAGE_APP/Contents/Resources/icon.icns"
+cp Resources/mac-nav-icon.icns "$STAGE_APP/Contents/Resources/mac-nav-icon.icns"
 
 # The Desktop is iCloud-synced, which stamps FinderInfo/provenance xattrs on
 # files; codesign rejects those. Stage + sign outside the sync location.

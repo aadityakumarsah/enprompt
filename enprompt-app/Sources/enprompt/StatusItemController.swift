@@ -26,12 +26,13 @@ final class StatusItemController: NSObject {
         statusItem = item
     }
 
-    /// The enprompt logo (icon.icns from the app bundle), sized for the menu
-    /// bar and forced non-template so the full-color logo shows.
+    /// The enprompt logo (mac-nav-icon.icns from the app bundle), sized for the
+    /// menu bar. Template image: macOS auto-renders it black on light menu bars
+    /// and white on dark ones so it never disappears.
     private func appIconImage() -> NSImage? {
-        guard let iconURL = Bundle.main.url(forResource: "icon", withExtension: "icns"),
+        guard let iconURL = Bundle.main.url(forResource: "mac-nav-icon", withExtension: "icns"),
               let image = NSImage(contentsOf: iconURL) else { return nil }
-        image.isTemplate = false
+        image.isTemplate = true
         image.size = NSSize(width: 18, height: 18)
         return image
     }
