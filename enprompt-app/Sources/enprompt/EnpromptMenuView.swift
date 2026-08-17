@@ -45,22 +45,15 @@ struct EnpromptMenuView: View {
                 trustBadge
             }
 
-            HStack(spacing: 4) {
-                Keycap("⌥", key: "Option")
-                Keycap("⌥", key: "Option")
-                Text("expand")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Keycap("⌥", key: "Option")
-                Text("hold 1.25s + speak")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Keycap("⌥", key: "Option")
-                Keycap("⌥", key: "Option")
-                Keycap("⌥", key: "Option")
-                Text("draw + speak")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    ShortcutChip(keys: "⌥⌥", label: "Enhance selected text")
+                    ShortcutChip(keys: "⌥ T", label: "Teach me")
+                }
+                HStack(spacing: 10) {
+                    ShortcutChip(keys: "⌥ hold", label: "Speak → dictation")
+                    ShortcutChip(keys: "⌥⌥⌥", label: "Canvas: draw + speak")
+                }
             }
             .frame(maxWidth: .infinity)
 
@@ -84,6 +77,23 @@ struct EnpromptMenuView: View {
                     .disabled(state.isEnhancing)
                     .help("Select any post text, pick a reply style, and the reply lands on your clipboard - ⌘V to paste")
 
+                    Button {
+                        if state.isSpeaking {
+                            state.stopAll()
+                        } else {
+                            state.startTeach()
+                        }
+                    } label: {
+                        Label(state.isSpeaking ? "Stop" : "Teach me", systemImage: state.isSpeaking ? "stop.fill" : "speaker.wave.2.fill")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(state.isSpeaking ? .red : nil)
+                    .disabled(state.isTeaching || !state.teachEnabled)
+                    .help(state.isSpeaking
+                        ? "Stop the voice right now"
+                        : "Explains the selected text like a five-year-old would understand - every detail, nothing left out - then speaks it in a natural local voice (shortcut: hold ⌥ and press T). Optional: turn it off in Settings.")
+
                     if let active = state.activePresetName {
                         Text(active)
                             .font(.caption2)
@@ -93,15 +103,34 @@ struct EnpromptMenuView: View {
                     }
                 }
             } else {
-                Button {
-                    Task { await state.enhanceFocusedText() }
-                } label: {
-                    Label("Enhance", systemImage: "wand.and.stars")
+                HStack(spacing: 8) {
+                    Button {
+                        state.startEnhance()
+                    } label: {
+                        Label("Enhance", systemImage: "wand.and.stars")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(state.isEnhancing)
+                    .help("Runs the same enhancement as a ⌥⌥ double-tap")
+
+                    Button {
+                        if state.isSpeaking {
+                            state.stopAll()
+                        } else {
+                            state.startTeach()
+                        }
+                    } label: {
+                        Label(state.isSpeaking ? "Stop" : "Teach me", systemImage: state.isSpeaking ? "stop.fill" : "speaker.wave.2.fill")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(state.isSpeaking ? .red : nil)
+                    .disabled(state.isTeaching || !state.teachEnabled)
+                    .help(state.isSpeaking
+                        ? "Stop the voice right now"
+                        : "Explains the selected text like a five-year-old would understand - every detail, nothing left out - then speaks it in a natural local voice (shortcut: hold ⌥ and press T). Optional: turn it off in Settings.")
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(state.isEnhancing)
-                .help("Runs the same enhancement as a ⌥⌥ double-tap")
             }
 
             if state.isEnhancing {
@@ -110,6 +139,17 @@ struct EnpromptMenuView: View {
                         .controlSize(.small)
                     Text("Preparing via LLM...")
                         .font(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    stopButton
+                }
+            } else if state.isTeaching {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Explaining like you're five...")
+                        .font(.caption)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    stopButton
                 }
             } else if case .success(let message) = state.enhancePhase {
                 Label(message, systemImage: "checkmark.circle.fill")
@@ -120,13 +160,63 @@ struct EnpromptMenuView: View {
                 EnhanceErrorCard(error: error, openSettings: { openSettings() })
             }
 
+            if !state.teachText.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Label(
+                            state.isTeaching
+                                ? "Writing the \(state.activeTeachLanguage.label) explanation…"
+                                : "\(state.activeTeachLanguage.label) explanation",
+                            systemImage: state.isTeaching ? "pencil.and.outline" : "speaker.wave.2.fill"
+                        )
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        Spacer()
+                        if state.isTeaching {
+                            Text("\(state.teachText.count) chars")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        } else if state.isSpeaking {
+                            Button {
+                                state.stopAll()
+                            } label: {
+                                Label("Stop", systemImage: "stop.fill")
+                            }
+                            .controlSize(.mini)
+                            .buttonStyle(.bordered)
+                            .tint(.red)
+                            .help("Stop the voice right now")
+                        } else {
+                            Button {
+                                state.speakTeachAgain()
+                            } label: {
+                                Label("Listen again", systemImage: "play.fill")
+                            }
+                            .controlSize(.mini)
+                            .buttonStyle(.bordered)
+                            .help("Speak the same explanation again")
+                        }
+                    }
+                    ScrollView {
+                        Text(state.teachText)
+                            .font(.caption)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 130)
+                    .padding(6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.gray.opacity(0.08))
+                    )
+                    Text("Also copied to your clipboard - ⌘V to paste it anywhere")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             ollamaSetupBanner
-
-            Text("Double-tap ⌥ enhances the focused text, hold ⌥ and speak for dictation, triple-tap ⌥ for the canvas: draw over the screen (pen, shapes, laser) while the mic listens live - press Esc to combine your drawing, the screenshot and your words into one prompt, pasted and saved under Captured prompts.\(state.isReplyPromptActive ? " With a reply prompt active: select a post, pick a style, paste with ⌘V." : "")")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Divider()
 
             Divider()
 
@@ -209,7 +299,7 @@ struct EnpromptMenuView: View {
             }
             .help("Click to change the API key or provider")
 
-                        if let update = state.updateInfo {
+            if let update = state.updateInfo {
                 HStack(spacing: 8) {
                     Label("enprompt \(update.version) available", systemImage: "arrow.down.circle.fill")
                         .font(.caption)
@@ -275,6 +365,19 @@ struct EnpromptMenuView: View {
             Text(state.isAccessibilityTrusted ? "Accessible" : "Not trusted")
                 .font(.caption)
         }
+    }
+
+    /// Stops the in-flight LLM call and any speaking voice at once.
+    private var stopButton: some View {
+        Button {
+            state.stopAll()
+        } label: {
+            Label("Stop", systemImage: "stop.fill")
+        }
+        .controlSize(.mini)
+        .buttonStyle(.bordered)
+        .tint(.red)
+        .help("Cancel the explanation and stop the voice")
     }
 
     /// One-click free local setup, right in the popover: when the user runs
@@ -409,5 +512,21 @@ struct Keycap: View {
                     )
             )
             .help(key)
+    }
+}
+
+/// One entry in the gesture cheat-sheet: a keycap pill plus its action.
+struct ShortcutChip: View {
+    let keys: String
+    let label: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Keycap(keys, key: label)
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
     }
 }
