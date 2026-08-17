@@ -291,18 +291,18 @@ struct EnpromptMenuView: View {
                     .font(.caption)
                     .fontWeight(.semibold)
                     .foregroundStyle(.orange)
-                Text("One click downloads llama3.2 (text) + qwen2.5vl (vision) at the same time and sets them up - no terminal needed.")
+                Text("One click installs the free Ollama app (if missing) + llama3.2 (text) + qwen2.5vl (vision) at the same time and sets them up - no terminal, no browser, nothing to drag.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Button {
                     Task { await state.installOllamaModels() }
                 } label: {
-                    Label("Install both models", systemImage: "arrow.down.circle")
+                    Label("Install everything (free)", systemImage: "arrow.down.circle")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .help("Downloads the text model (~2 GB) and the vision model (~6 GB) at the same time, then selects them automatically")
+                .help("Downloads the Ollama app (~190 MB) if missing, then the text model (~2 GB) + vision model (~6 GB) at the same time, and selects them automatically")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(10)
@@ -317,7 +317,7 @@ struct EnpromptMenuView: View {
         } else if state.provider == .ollama, state.ollamaInstalling {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Text("Installing llama3.2 + qwen2.5vl… \(Int(state.ollamaInstallProgress * 100))%")
+                    Text(state.ollamaSetupPhase ?? "Installing…")
                         .font(.caption)
                         .fontWeight(.semibold)
                     Spacer()
@@ -329,7 +329,7 @@ struct EnpromptMenuView: View {
                 }
                 ProgressView(value: state.ollamaInstallProgress)
                     .progressViewStyle(.linear)
-                Text("Both models are downloading at the same time - keep this open, enprompt sets them up when it finishes.")
+                Text("enprompt installs the Ollama app (if needed) and both models by itself - keep this open, it sets everything up when the progress hits 100%.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

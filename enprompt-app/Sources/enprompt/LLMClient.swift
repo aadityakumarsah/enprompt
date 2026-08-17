@@ -78,6 +78,7 @@ enum LLMError: LocalizedError {
     case http(Int, String)
     case decoding(String)
     case emptyResponse
+    case ollamaInstallFailed
 
     var errorDescription: String? {
         switch self {
@@ -91,6 +92,8 @@ enum LLMError: LocalizedError {
             return "Response decoding failed: \(message)"
         case .emptyResponse:
             return "The model returned an empty response"
+        case .ollamaInstallFailed:
+            return "Couldn't install the Ollama app automatically"
         }
     }
 
@@ -122,6 +125,8 @@ enum LLMError: LocalizedError {
             return "The AI's response couldn't be read. Please try again."
         case .emptyResponse:
             return "The AI returned an empty response. Please try again."
+        case .ollamaInstallFailed:
+            return "Couldn't install the Ollama app automatically. Install it once from ollama.com/download, then click Continue."
         }
     }
 }
@@ -2858,6 +2863,96 @@ Not:
             }
             try await group.waitForAll()
         }
+    }
+
+    // MARK: - Ollama app install
+
+    /// Direct download URL for the free Ollama macOS app (a zip containing
+    /// Ollama.app). ollama.com/download redirects here; hitting it directly
+    /// keeps the whole setup in-app - no browser, no drag-and-drop.
+    static let ollamaAppDownloadURL = URL(string: "https://ollama.com/download/Ollama-darwin.zip")!
+
+    /// Downloads the Ollama macOS app zip (~190 MB) and returns its local
+    /// path, reporting progress (0...1) as bytes arrive.
+    static func downloadOllamaApp(
+        progress: @escaping (Double) -> Void
+    ) async throws -> URL {
+        let dest = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Ollama-darwin-\(UUID().uuidString).zip")
+        // FileHandle(forWritingTo:) needs the file to exist first.
+        guard FileManager.default.createFile(atPath: dest.path, contents: nil) else {
+            throw LLMError.ollamaInstallFailed
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 3600
+        config.timeoutIntervalForResource = 3600
+        let session = URLSession(configuration: config)
+        let (bytes, response) = try await session.bytes(from: ollamaAppDownloadURL)
+        try checkHTTP(response: response, data: Data())
+        let expected = Double((response as? HTTPURLResponse)?.expectedContentLength ?? 0)
+        let handle = try FileHandle(forWritingTo: dest)
+        defer { try? handle.close() }
+        var received: Double = 0
+        var buffer = Data()
+        for try await byte in bytes {
+            buffer.append(byte)
+            if buffer.count >= 64 * 1024 {
+                received += Double(buffer.count)
+                try handle.write(contentsOf: buffer)
+                buffer.removeAll(keepingCapacity: true)
+                if expected > 0 {
+                    progress(min(max(received / expected, 0), 1))
+                }
+            }
+        }
+        if !buffer.isEmpty {
+            received += Double(buffer.count)
+            try handle.write(contentsOf: buffer)
+            if expected > 0 {
+                progress(min(max(received / expected, 0), 1))
+            }
+        }
+        return dest
+    }
+
+    /// Installs Ollama.app into /Applications from the downloaded zip (no
+    /// admin password needed for the standard /Applications drag-install).
+    /// Falls back to ~/Applications when /Applications isn't writable.
+    static func installOllamaApp(from zipURL: URL) throws -> URL {
+        let fileManager = FileManager.default
+        let stage = fileManager.temporaryDirectory
+            .appendingPathComponent("ollama-extract-\(UUID().uuidString)")
+        try fileManager.createDirectory(at: stage, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: stage) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        process.arguments = ["-x", "-k", zipURL.path, stage.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw LLMError.ollamaInstallFailed }
+
+        let extracted = stage.appendingPathComponent("Ollama.app")
+        guard fileManager.fileExists(atPath: extracted.path) else { throw LLMError.ollamaInstallFailed }
+
+        let destinations = [
+            URL(fileURLWithPath: "/Applications"),
+            fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Applications"),
+        ]
+        for folder in destinations {
+            let target = folder.appendingPathComponent("Ollama.app")
+            // Replace any leftover partial copy from a previous attempt.
+            try? fileManager.removeItem(at: target)
+            do {
+                try fileManager.moveItem(at: extracted, to: target)
+                return target
+            } catch {
+                continue
+            }
+        }
+        throw LLMError.ollamaInstallFailed
     }
 
     /// Rough token estimate (OpenAI-style heuristic: ~4 characters per token).

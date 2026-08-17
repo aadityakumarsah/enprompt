@@ -106,6 +106,9 @@ final class AppState: ObservableObject {
     @Published var ollamaInstalling = false
     /// Combined download progress of the one-click setup (0...1).
     @Published var ollamaInstallProgress: Double = 0
+    /// Human-readable phase shown above the progress bar during the one-click
+    /// setup ("Downloading the free Ollama app… 42%", "Starting Ollama…", …).
+    @Published var ollamaSetupPhase: String?
 
     /// A newer enprompt release exists on GitHub - shown as a banner in the
     /// popover with a one-click download (DMG + Finder, no notarization).
@@ -336,6 +339,12 @@ final class AppState: ObservableObject {
                 guidance: "Please try again - if it keeps happening, shorten the text.",
                 fix: nil
             )
+        case .ollamaInstallFailed:
+            return EnhanceError(
+                title: "Couldn't install the Ollama app automatically",
+                guidance: "Install it once from ollama.com/download, then click Install everything again.",
+                fix: nil
+            )
         }
     }
 
@@ -415,6 +424,7 @@ final class AppState: ObservableObject {
         let fileManager = FileManager.default
         let candidates = [
             "/Applications/Ollama.app",
+            "\(NSHomeDirectory())/Applications/Ollama.app",
             "/opt/homebrew/bin/ollama",
             "/usr/local/bin/ollama",
             "\(NSHomeDirectory())/.ollama",
@@ -422,19 +432,23 @@ final class AppState: ObservableObject {
         return candidates.contains { fileManager.fileExists(atPath: $0) }
     }
 
-    /// One-click free setup: makes sure the Ollama server is running (starting
-    /// the app if it is installed), then downloads the normal text model and
-    /// the vision model AT THE SAME TIME with a live 0–100% progress bar, and
-    /// finally picks them so everything just works - no terminal, no juggling.
-    /// A brand-new user only ever clicks Install / Continue.
+    /// One-click free setup - the WHOLE thing, zero user juggling:
+    /// 1. If the Ollama app isn't installed, downloads it (~190 MB) and
+    ///    installs it into /Applications automatically (no browser, no drag).
+    /// 2. Starts the app and waits for the server.
+    /// 3. Downloads the text model + the vision model AT THE SAME TIME with a
+    ///    live 0–100% progress bar.
+    /// 4. Picks both models and saves, so Enhance works immediately.
     func installOllamaModels() async {
         guard !ollamaInstalling else { return }
         ollamaInstalling = true
         ollamaInstallProgress = 0
         ollamaModelError = nil
+        ollamaSetupPhase = nil
         defer {
             ollamaInstalling = false
             ollamaInstallProgress = 0
+            ollamaSetupPhase = nil
         }
         let enhanceModel = LLMProvider.ollama.defaultModel      // llama3.2
         let visionModelName = "qwen2.5vl:7b"                     // vision
@@ -446,10 +460,31 @@ final class AppState: ObservableObject {
         baseURL = LLMProvider.ollama.defaultBaseURL
         persistConfig()
 
-        // 1. The server must answer: launch the app if it's installed, then
-        //    wait for it to come up (a fresh launch takes a few seconds).
+        // 1. No Ollama app yet: download + install it silently.
+        if !Self.ollamaAppInstalled {
+            DebugLogger.log("OLLAMA: app not installed - downloading automatically")
+            do {
+                let zip = try await LLMClient.downloadOllamaApp { [weak self] progress in
+                    Task { @MainActor in
+                        self?.ollamaInstallProgress = progress
+                        self?.ollamaSetupPhase = "Downloading the free Ollama app… \(Int((progress * 100).rounded()))%"
+                    }
+                }
+                ollamaSetupPhase = "Installing Ollama…"
+                let installedURL = try LLMClient.installOllamaApp(from: zip)
+                DebugLogger.log("OLLAMA: app installed at \(installedURL.path)")
+            } catch {
+                ollamaModelError = "Couldn't install the Ollama app automatically. Install it once from ollama.com/download, then click Install everything again."
+                DebugLogger.log("OLLAMA: app install failed: \(error.localizedDescription)")
+                return
+            }
+        }
+
+        // 2. The server must answer: launch the app, then wait for it to come
+        //    up (a fresh launch takes a few seconds).
+        ollamaSetupPhase = "Starting Ollama…"
         var serverUp = await ollamaServerReachable()
-        if !serverUp, Self.ollamaAppInstalled {
+        if !serverUp {
             startOllamaApp()
             for _ in 0..<30 where !serverUp {
                 try? await Task.sleep(nanoseconds: 600_000_000)
@@ -457,19 +492,17 @@ final class AppState: ObservableObject {
             }
         }
         guard serverUp else {
-            ollamaModelError = Self.ollamaAppInstalled
-                ? "Ollama isn't running - open the Ollama app once, then click Continue."
-                : "Ollama isn't installed yet - install the free app first, then click Continue."
+            ollamaModelError = "Ollama isn't running - open the Ollama app once, then click Install everything again."
             return
         }
 
-        // 2. Skip anything that is already installed.
+        // 3. Skip anything that is already installed.
         var missing = [enhanceModel, visionModelName]
         if let installed = try? await LLMClient.fetchOllamaModels(baseURL: baseURL) {
             missing = missing.filter { !installed.contains($0) }
         }
 
-        // 3. Everything present: just select the models and we're done.
+        // 4. Everything present: just select the models and we're done.
         guard !missing.isEmpty else {
             await selectLocalDefaults(enhanceModel, visionModelName)
             ollamaModelError = "llama3.2 + qwen2.5vl:7b are ready to use"
@@ -477,15 +510,17 @@ final class AppState: ObservableObject {
             return
         }
 
-        // 4. Download the missing models together, showing one progress bar.
+        // 5. Download the missing models together, showing one progress bar.
         DebugLogger.log("OLLAMA: one-click setup pulling \(missing.joined(separator: ", "))")
         do {
             try await LLMClient.pullOllamaModels(missing, baseURL: baseURL) { [weak self] progress in
                 Task { @MainActor in
                     self?.ollamaInstallProgress = progress
+                    self?.ollamaSetupPhase = "Downloading llama3.2 + qwen2.5vl at the same time… \(Int((progress * 100).rounded()))%"
                 }
             }
             ollamaInstallProgress = 1
+            ollamaSetupPhase = nil
             await loadOllamaModels()
             await selectLocalDefaults(enhanceModel, visionModelName)
             DebugLogger.log("OLLAMA: setup complete - installed \(missing.joined(separator: ", "))")
@@ -518,9 +553,17 @@ final class AppState: ObservableObject {
     }
 
     /// Launches the Ollama menu-bar app (macOS apps can't trust PATH, so the
-    /// app path is used directly).
+    /// app path is used directly). Handles both /Applications and
+    /// ~/Applications installs.
     func startOllamaApp() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications/Ollama.app"))
+        let candidates = [
+            "/Applications/Ollama.app",
+            "\(NSHomeDirectory())/Applications/Ollama.app",
+        ]
+        for path in candidates where FileManager.default.fileExists(atPath: path) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            return
+        }
     }
 
     /// Opens the enprompt "run locally" guide - installation commands, model

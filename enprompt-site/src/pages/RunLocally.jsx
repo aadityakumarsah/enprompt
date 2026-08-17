@@ -58,7 +58,9 @@ export default function RunLocally() {
             Llama models are downloaded and run by <b>Ollama</b>, a free engine (think of it as the
             "app store + runner" for open models). enprompt detects it automatically — in Settings, the{' '}
             <b>"Run locally — free &amp; private (guide)"</b> button in the LLM section opens this page,
-            and the Ollama models section installs and pulls everything for you with one click. Manual path:
+            and the Ollama models section does everything for you: <b>one click installs the Ollama app
+            itself (if missing), starts it, and pulls both models</b> — no terminal, no browser, no
+            drag-and-drop. Everything below is the manual path only:
           </p>
           <div className="steps">
             <div className="step-card">
@@ -84,8 +86,8 @@ export default function RunLocally() {
               <div>
                 <h3>Pull the two recommended Llama models</h3>
                 <p>
-                  One handles text, one handles images (screen capture). Or skip the terminal — enprompt
-                  Settings → Ollama models has <b>one-click pull buttons</b>.
+                  One handles text, one handles images (screen capture). Or skip the terminal entirely —
+                  enprompt downloads both at the same time with a live progress bar.
                 </p>
                 <CommandLine
                   id="cmd-pull-enhance"
@@ -94,8 +96,8 @@ export default function RunLocally() {
                 />
                 <CommandLine
                   id="cmd-pull-vision"
-                  text="ollama pull llama3.2-vision"
-                  hint="Vision — image / screen capture (triple-tap ⌥) — ≈ 7.9 GB · needs 16 GB RAM"
+                  text="ollama pull qwen2.5vl:7b"
+                  hint="Vision — image / screen capture (triple-tap ⌥) — ≈ 6.0 GB · needs 16 GB RAM"
                 />
               </div>
             </div>
